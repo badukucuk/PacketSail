@@ -1,0 +1,11 @@
+# Build artifacts
+build/
+*.o
+*.obj
+
+# macOS metadata
+.DS_Store
+
+# Locally compiled executable
+/packetsail
+/packetsail.exe

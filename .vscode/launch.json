@@ -1,0 +1,12 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "PacketSail Debug",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/debug/packetsail",
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
