@@ -1,0 +1,8 @@
+# Build artifacts
+/build/
+
+# macOS metadata
+.DS_Store
+
+# Editor-specific local settings
+.vscode/
