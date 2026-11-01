@@ -8,7 +8,12 @@ TLS record splitting has been implemented and is covered by unit tests. The netw
 
 PacketSail is in early development.
 
-The initial technical research identified TLS record splitting as a promising approach. This behavior was successfully tested using an external reference tool, but it has not yet been implemented in PacketSail.
+TLS record splitting has been implemented and is covered by unit tests.
+
+A RAII-based socket handle is available for managing socket ownership.
+The networking and proxy components are still under development.
+
+PacketSail cannot currently establish Discord connections.
 
 ## Goals
 
@@ -35,6 +40,7 @@ Requirements:
 ```bash
 cmake -S . -B build
 cmake --build build
+ctest --test-dir build --output-on-failure
 ./build/packetsail
 ```
 

@@ -10,7 +10,7 @@ public:
     SocketHandle(const SocketHandle&) = delete;
     SocketHandle& operator=(const SocketHandle&) = delete;
 
-    SocketHandle (SocketHandle&& other) noexcept;
+    SocketHandle(SocketHandle&& other) noexcept;
     SocketHandle& operator=(SocketHandle&& other) noexcept;
 
     int get() const;

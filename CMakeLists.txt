@@ -10,6 +10,7 @@ add_executable(packetsail
     src/main.cpp
     src/tls_record.cpp
     src/socket_handle.cpp
+    src/tcp_connection.cpp
 )
 
 target_include_directories(packetsail PRIVATE include)
@@ -38,4 +39,17 @@ target_include_directories(socket_handle_test PRIVATE include)
 add_test(
     NAME socket_handle_ownership
     COMMAND socket_handle_test
+)
+
+add_executable(tcp_connection_test
+    tests/tcp_connection_test.cpp
+    src/tcp_connection.cpp
+    src/socket_handle.cpp
+)
+
+target_include_directories(tcp_connection_test PRIVATE include)
+
+add_test(
+    NAME tcp_connection_validation
+    COMMAND tcp_connection_test
 )

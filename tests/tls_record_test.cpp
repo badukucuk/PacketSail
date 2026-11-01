@@ -1,7 +1,7 @@
 #include "packetsail/tls_record.hpp"
 
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
