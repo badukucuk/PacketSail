@@ -1,10 +1,10 @@
 #include "packetsail/tls_record.hpp"
 
 #include <cstdint>
+#include <cstddef>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
-#include <cstddef>
 
 bool rejects_invalid_record(const std::vector<std::uint8_t>& record) {
     try {

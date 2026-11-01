@@ -2,7 +2,7 @@
 
 PacketSail is an open-source C++20 project focused on improving network compatibility in environments affected by Deep Packet Inspection (DPI).
 
-The initial goal is to develop a macOS command-line application capable of helping restore access to Discord through DPI compatibility techniques.
+TLS record splitting has been implemented and is covered by unit tests. The networking and proxy components are not yet implemented, so PacketSail cannot currently establish connections to Discord.
 
 ## Project Status
 
@@ -23,7 +23,7 @@ The initial technical research identified TLS record splitting as a promising ap
 - C++20
 - CMake
 - Apple Clang
-- CTest (planned)
+- CTest
 
 ## Build
 
