@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 
 #include <array>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -65,6 +66,8 @@ bool test_tcp_loopback_connection() {
 
     sockaddr_in address{};
     address.sin_family = AF_INET;
+
+    // Request an ephemeral port to avoid conflicts with other local services.
     address.sin_port = htons(0);
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
@@ -144,6 +147,16 @@ bool test_tcp_loopback_connection() {
     return buffer == message;
 }
 
+bool test_send_all_invalid_socket() {
+    const char data = 'A';
+
+    errno = 0;
+
+    const bool result = packetsail::send_all(-1, &data, 1);
+
+    return !result && errno == EBADF;
+}
+
 int main() {
     bool all_passed = true;
 
@@ -165,6 +178,13 @@ int main() {
         std::cout << "PASS: test_tcp_loopback_connection\n";
     } else {
         std::cerr << "FAIL: test_tcp_loopback_connection\n";
+        all_passed = false;
+    }
+
+    if (test_send_all_invalid_socket()) {
+        std::cout << "PASS: test_send_all_invalid_socket\n";
+    } else {
+        std::cerr << "FAIL: test_send_all_invalid_socket\n";
         all_passed = false;
     }
 
