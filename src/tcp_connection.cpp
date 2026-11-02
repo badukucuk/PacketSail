@@ -12,6 +12,7 @@ namespace packetsail {
 ssize_t receive_data(int fd, void* buffer, std::size_t size) {
     ssize_t received = -1;
 
+    // An interrupted receive operation does not necessarily indicate a broken connection.
     do {
         received = ::recv(fd, buffer, size, 0);
     } while (received == -1 && errno == EINTR);
@@ -23,6 +24,7 @@ bool send_all(int fd, const void* buffer, std::size_t size) {
     const auto* data = static_cast<const char*>(buffer);
     std::size_t total_sent = 0;
 
+    // A successful send call may transfer fewer bytes than requested.
     while (total_sent < size) {
         ssize_t sent = -1;
 
@@ -40,6 +42,7 @@ bool send_all(int fd, const void* buffer, std::size_t size) {
         }
 
         if (sent == 0) {
+            // Treat a zero-byte send as a failure to make forward progress.
             errno = EIO;
             return false;
         }

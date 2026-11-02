@@ -46,6 +46,7 @@ int main() {
             return 1;
         }
 
+        // Prevent writes to disconnected clients from terminating the process.
         const int no_sigpipe = 1;
 
         if (::setsockopt(client.get(), SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe)) == -1) {

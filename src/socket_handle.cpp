@@ -7,11 +7,13 @@ namespace packetsail {
 SocketHandle::SocketHandle(int fd) : fd_(fd) {}
 
 SocketHandle::SocketHandle(SocketHandle&& other) noexcept : fd_(other.fd_) {
+    // Invalidate the source to prevent both objects from closing the descriptor.
     other.fd_ = -1;
 }
 
 SocketHandle& SocketHandle::operator=(SocketHandle&& other) noexcept {
     if (this != &other) {
+        // Release the currently owned socket before taking ownership of another.
         if (fd_ != -1) {
             ::close(fd_);
         }

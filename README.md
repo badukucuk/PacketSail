@@ -2,16 +2,19 @@
 
 PacketSail is an open-source C++20 project focused on improving network compatibility in environments affected by Deep Packet Inspection (DPI).
 
-TLS record splitting has been implemented and is covered by unit tests. The networking and proxy components are not yet implemented, so PacketSail cannot currently establish connections to Discord.
+The initial goal is to develop a macOS command-line tool to help restore access to Discord.
 
 ## Project Status
 
 PacketSail is in early development.
 
-TLS record splitting has been implemented and is covered by unit tests.
+Implemented components:
+- TLS record splitting with unit tests.
+- RAII-based socket ownership management.
+- A sequential TCP echo server with connection handling.
+- TCP data transfer utilities and integration tests.
 
-A RAII-based socket handle is available for managing socket ownership.
-The networking and proxy components are still under development.
+SOCKS5 proxy support and TLS traffic integration are not yet implemented.
 
 PacketSail cannot currently establish Discord connections.
 
