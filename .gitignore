@@ -1,0 +1,26 @@
+# Build artifacts
+/bin/
+/dist/
+/packetsail
+/packetsail.exe
+
+# Go test and coverage artifacts
+*.test
+coverage.out
+/coverage/
+
+# Local Go workspace files
+/go.work
+/go.work.sum
+
+# Editor and IDE settings
+/.vscode/
+/.idea/
+
+# macOS metadata
+.DS_Store
+
+# Local environment files
+.env
+.env.*
+!.env.example
