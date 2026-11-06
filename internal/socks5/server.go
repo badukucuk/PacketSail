@@ -88,20 +88,54 @@ func handleConnection(client net.Conn) {
 		return
 	}
 
-	if request[3] != 0x01 {
+	var host string
+	var port uint16
+
+	switch request[3] {
+	case 0x01:
+		// IPv4 addresses contain four address bytes followed by a two-byte port.
+		var destination [6]byte
+		if _, err := io.ReadFull(client, destination[:]); err != nil {
+			return
+		}
+
+		host = net.IP(destination[:4]).String()
+		port = binary.BigEndian.Uint16(destination[4:])
+
+	case 0x03:
+		// Domain names are prefixed by their length in bytes.
+		var length [1]byte
+		if _, err := io.ReadFull(client, length[:]); err != nil {
+			return
+		}
+
+		if length[0] == 0 {
+			if err := sendReply(client, 0x04, nil); err != nil {
+				log.Printf("send empty hostname reply: %v", err)
+			}
+			return
+		}
+
+		domain := make([]byte, int(length[0]))
+		if _, err := io.ReadFull(client, domain); err != nil {
+			return
+		}
+
+		var portBytes [2]byte
+		if _, err := io.ReadFull(client, portBytes[:]); err != nil {
+			return
+		}
+
+		host = string(domain)
+		port = binary.BigEndian.Uint16(portBytes[:])
+
+	default:
 		if err := sendReply(client, 0x08, nil); err != nil {
 			log.Printf("send unsupported address type reply: %v", err)
 		}
 		return
 	}
 
-	var destination [6]byte
-	if _, err := io.ReadFull(client, destination[:]); err != nil {
-		return
-	}
-
-	host := net.IP(destination[:4]).String()
-	port := binary.BigEndian.Uint16(destination[4:])
 	target := net.JoinHostPort(host, strconv.Itoa(int(port)))
 
 	server, err := net.DialTimeout("tcp4", target, 5*time.Second)
