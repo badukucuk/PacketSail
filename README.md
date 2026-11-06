@@ -24,9 +24,11 @@ This approach was selected after preliminary network experiments showed that spl
 
 PacketSail provides a command-line interface and an experimental local SOCKS5 proxy supporting IPv4 TCP CONNECT requests and domain-name destinations.
 
-Domain-name resolution currently uses the operating system's DNS configuration.
+Domain names are resolved using DNS-over-HTTPS (DoH) through Google Public DNS. The resolver connects to a predefined IPv4 address to avoid relying on the operating system's DNS configuration for the DoH server.
 
-TLS record fragmentation and DPI circumvention are not yet implemented. IPv6 destinations, UDP relay, and authentication are not supported.
+When DNS returns multiple IPv4 addresses, PacketSail attempts TCP connections sequentially until one succeeds or all attempts fail.
+
+TLS record fragmentation and DPI circumvention are not yet implemented. IPv6 destinations, UDP relay, and SOCKS5 authentication are not supported.
 
 ## Building
 
@@ -91,7 +93,7 @@ curl -4 -I --socks5-hostname 127.0.0.1:9876 https://example.com
 
 Stop the proxy with `Ctrl+C`.
 
-**Limitations:** Domain names are resolved using the operating system's DNS configuration. PacketSail does not yet implement TLS record fragmentation or DPI circumvention. The proxy is intended for local experimental use only.
+**Limitations:** Domain-name destinations are resolved using Google Public DNS over HTTPS. The DoH endpoint uses a fixed bootstrap IP address and requires network access to the provider. The resolver currently supports IPv4 A records only. PacketSail does not yet implement TLS record fragmentation or DPI circumvention. The proxy is intended for local experimental use only.
 
 ## License
 

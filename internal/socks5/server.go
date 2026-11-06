@@ -1,6 +1,7 @@
 package socks5
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -8,6 +9,8 @@ import (
 	"net"
 	"strconv"
 	"time"
+
+	"github.com/badukucuk/PacketSail/internal/dns"
 )
 
 // ListenAndServe starts a local SOCKS5 server and accepts TCP connections.
@@ -19,6 +22,7 @@ func ListenAndServe(address string) error {
 	defer listener.Close()
 
 	log.Printf("SOCKS5 proxy listening on %s", listener.Addr())
+	resolver := dns.NewResolver()
 
 	for {
 		conn, err := listener.Accept()
@@ -26,12 +30,12 @@ func ListenAndServe(address string) error {
 			return fmt.Errorf("accept SOCKS5 connection: %w", err)
 		}
 
-		go handleConnection(conn)
+		go handleConnection(conn, resolver.LookupIPv4)
 	}
 }
 
 // handleConnection processes one SOCKS5 client connection.
-func handleConnection(client net.Conn) {
+func handleConnection(client net.Conn, lookupIPv4 func(context.Context, string) ([]net.IP, error)) {
 	defer client.Close()
 
 	// Limit how long a client can leave protocol negotiation unfinished.
@@ -136,26 +140,69 @@ func handleConnection(client net.Conn) {
 		return
 	}
 
-	target := net.JoinHostPort(host, strconv.Itoa(int(port)))
+	var addresses []net.IP
 
-	server, err := net.DialTimeout("tcp4", target, 5*time.Second)
-	if err != nil {
-		log.Printf("connect to %s: %v", target, err)
+	if request[3] == 0x03 {
+		// Resolve domain names through DNS-over-HTTPS, not system DNS.
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		resolved, err := lookupIPv4(ctx, host)
+		cancel()
 
-		if replyErr := sendReply(client, 0x01, nil); replyErr != nil {
-			log.Printf("send connection failure reply: %v", replyErr)
+		if err != nil {
+			log.Printf("resolve %s: %v", host, err)
+
+			if replyErr := sendReply(client, 0x04, nil); replyErr != nil {
+				log.Printf("send DNS failure reply: %v", replyErr)
+			}
+			return
+		}
+
+		addresses = resolved
+	} else {
+		// IPv4 destinations already contain the target address.
+		addresses = []net.IP{net.ParseIP(host).To4()}
+	}
+
+	if len(addresses) == 0 {
+		log.Printf("no IPv4 addresses available for %s", host)
+
+		if err := sendReply(client, 0x04, nil); err != nil {
+			log.Printf("send missing address reply: %v", err)
 		}
 		return
 	}
-	defer server.Close()
 
-	if err := sendReply(client, 0x00, server.LocalAddr().(*net.TCPAddr)); err != nil {
+	// The SOCKS5 request has been parsed. Outbound operations have their own timeouts.
+	if err := client.SetDeadline(time.Time{}); err != nil {
+		log.Printf("clear client deadline: %v", err)
 		return
 	}
 
-	// Remove the negotiation deadline for the established TCP stream.
-	if err := client.SetDeadline(time.Time{}); err != nil {
-		log.Printf("clear client deadline: %v", err)
+	var server net.Conn
+	var lastErr error
+
+	// Try each resolved IPv4 address until a TCP connection succeeds.
+	for _, ip := range addresses {
+		target := net.JoinHostPort(ip.String(), strconv.Itoa(int(port)))
+
+		server, lastErr = net.DialTimeout("tcp4", target, 5*time.Second)
+		if lastErr == nil {
+			break
+		}
+
+		log.Printf("connect to %s: %v", target, lastErr)
+	}
+
+	if server == nil {
+		if err := sendReply(client, 0x01, nil); err != nil {
+			log.Printf("send connection failure reply: %v", err)
+		}
+		return
+	}
+
+	defer server.Close()
+
+	if err := sendReply(client, 0x00, server.LocalAddr().(*net.TCPAddr)); err != nil {
 		return
 	}
 
