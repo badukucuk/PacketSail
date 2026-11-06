@@ -26,9 +26,42 @@ PacketSail is currently in its initial setup phase. DPI circumvention functional
 
 ## Building
 
-PacketSail is written in Go.
+PacketSail requires Go 1.27.3 or later.
 
-Build and usage instructions will be added when the initial command-line application is implemented.
+Clone the repository:
+
+```bash
+git clone https://github.com/badukucuk/PacketSail.git
+cd PacketSail
+```
+
+Build the CLI:
+
+```bash
+go build -o bin/packetsail ./cmd/packetsail
+```
+
+Run the application:
+
+```bash
+./bin/packetsail --help
+```
+
+## Usage
+
+Display version information:
+
+```bash
+./bin/packetsail --version
+```
+
+Display available options:
+
+```bash
+./bin/packetsail --help
+```
+
+PacketSail is under active development. Network proxying and DPI circumvention functionality are not yet available.
 
 ## License
 
