@@ -22,7 +22,11 @@ This approach was selected after preliminary network experiments showed that spl
 
 **Early development**
 
-PacketSail is currently in its initial setup phase. DPI circumvention functionality has not yet been implemented.
+PacketSail currently provides a command-line interface and an experimental local SOCKS5 proxy supporting IPv4 TCP CONNECT connections.
+
+The proxy does not yet implement TLS record fragmentation or DPI circumvention.
+
+SOCKS5 hostname resolution, IPv6 destinations, UDP relay, and authentication are not currently supported.
 
 ## Building
 
@@ -60,6 +64,26 @@ Display available options:
 ```bash
 ./bin/packetsail --help
 ```
+
+### Local SOCKS5 Proxy
+
+Start the experimental SOCKS5 proxy:
+
+```bash
+./bin/packetsail --proxy
+```
+
+By default, PacketSail listens on `127.0.0.1:9876` and accepts unauthenticated SOCKS5 TCP CONNECT requests using IPv4 destination addresses.
+
+Test the proxy with curl:
+
+```bash
+curl -4 -I --socks5 127.0.0.1:9876 https://example.com
+```
+
+Stop the proxy with `Ctrl+C`.
+
+**Limitations:** The proxy currently forwards TCP traffic without modifying TLS records. It does not bypass DPI restrictions and should not be exposed to untrusted networks.
 
 PacketSail is under active development. Network proxying and DPI circumvention functionality are not yet available.
 
