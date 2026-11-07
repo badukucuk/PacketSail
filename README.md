@@ -24,11 +24,19 @@ This approach was selected after preliminary network experiments showed that spl
 
 PacketSail provides a command-line interface and an experimental local SOCKS5 proxy supporting IPv4 TCP CONNECT requests and domain-name destinations.
 
-Domain names are resolved using DNS-over-HTTPS (DoH) through Google Public DNS. The resolver connects to a predefined IPv4 address to avoid relying on the operating system's DNS configuration for the DoH server.
+Domain names are resolved using DNS-over-HTTPS (DoH) through Google Public DNS. The resolver uses a fixed bootstrap IPv4 address to avoid relying on system DNS for the DoH server.
 
-When DNS returns multiple IPv4 addresses, PacketSail attempts TCP connections sequentially until one succeeds or all attempts fail.
+When multiple IPv4 addresses are returned, PacketSail attempts TCP connections sequentially until one succeeds or all attempts fail.
 
-TLS record fragmentation and DPI circumvention are not yet implemented. IPv6 destinations, UDP relay, and SOCKS5 authentication are not supported.
+PacketSail also supports **experimental TLS ClientHello record fragmentation**, which can be enabled using the `--fragment` flag. When enabled, the proxy attempts to split the initial ClientHello into two TLS handshake records at a position inside the SNI hostname for connections targeting port 443.
+
+TLS fragmentation is disabled by default. Unsupported ClientHello formats are forwarded without modification when possible.
+
+Local tests have verified successful TLS 1.3 handshakes with fragmented ClientHello records, and manual HTTPS connectivity tests have succeeded in both proxy modes.
+
+**DPI circumvention and Discord connectivity have not yet been verified using PacketSail.**
+
+IPv6 destinations, UDP relay, and SOCKS5 authentication are not supported.
 
 ## Building
 
@@ -69,7 +77,7 @@ Display available options:
 
 ### Local SOCKS5 Proxy
 
-Start the experimental SOCKS5 proxy:
+Start the local SOCKS5 proxy:
 
 ```bash
 ./bin/packetsail --proxy
@@ -77,23 +85,33 @@ Start the experimental SOCKS5 proxy:
 
 By default, PacketSail listens on `127.0.0.1:9876` and accepts unauthenticated SOCKS5 TCP CONNECT requests.
 
-The proxy supports IPv4 addresses and domain-name destinations.
+Domain-name destinations are resolved using DNS-over-HTTPS.
 
-Test connectivity with locally resolved DNS:
-
-```bash
-curl -4 -I --socks5 127.0.0.1:9876 https://example.com
-```
-
-Test proxy-side hostname resolution:
+Test HTTPS connectivity:
 
 ```bash
-curl -4 -I --socks5-hostname 127.0.0.1:9876 https://example.com
+curl -4 -I \
+  --socks5-hostname 127.0.0.1:9876 \
+  https://example.com
 ```
 
-Stop the proxy with `Ctrl+C`.
+### Experimental TLS Fragmentation
 
-**Limitations:** Domain-name destinations are resolved using Google Public DNS over HTTPS. The DoH endpoint uses a fixed bootstrap IP address and requires network access to the provider. The resolver currently supports IPv4 A records only. PacketSail does not yet implement TLS record fragmentation or DPI circumvention. The proxy is intended for local experimental use only.
+Enable TLS ClientHello record fragmentation:
+
+```bash
+./bin/packetsail --proxy --fragment
+```
+
+When enabled, PacketSail examines the initial TLS handshake record for connections targeting port 443. For supported ClientHello messages containing an SNI hostname, the proxy splits the handshake payload into two TLS records while preserving the original handshake bytes.
+
+The feature is experimental and may not work with all TLS implementations, network conditions, or ClientHello formats.
+
+TLS fragmentation is disabled by default. Use `--proxy` without `--fragment` to run the proxy without TLS record modification.
+
+Stop the proxy using `Ctrl+C`.
+
+**Limitations:** The DNS resolver supports IPv4 A records through a single DoH provider with a fixed bootstrap IP address. TLS fragmentation currently targets port 443 and supports only certain ClientHello layouts. DPI circumvention is not guaranteed. The proxy is intended for local experimental use.
 
 ## License
 

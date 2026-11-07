@@ -11,10 +11,11 @@ import (
 	"time"
 
 	"github.com/badukucuk/PacketSail/internal/dns"
+	"github.com/badukucuk/PacketSail/internal/tlsfrag"
 )
 
 // ListenAndServe starts a local SOCKS5 server and accepts TCP connections.
-func ListenAndServe(address string) error {
+func ListenAndServe(address string, fragment bool) error {
 	listener, err := net.Listen("tcp4", address)
 	if err != nil {
 		return fmt.Errorf("start SOCKS5 listener: %w", err)
@@ -30,12 +31,12 @@ func ListenAndServe(address string) error {
 			return fmt.Errorf("accept SOCKS5 connection: %w", err)
 		}
 
-		go handleConnection(conn, resolver.LookupIPv4)
+		go handleConnection(conn, resolver.LookupIPv4, fragment)
 	}
 }
 
 // handleConnection processes one SOCKS5 client connection.
-func handleConnection(client net.Conn, lookupIPv4 func(context.Context, string) ([]net.IP, error)) {
+func handleConnection(client net.Conn, lookupIPv4 func(context.Context, string) ([]net.IP, error), fragment bool) {
 	defer client.Close()
 
 	// Limit how long a client can leave protocol negotiation unfinished.
@@ -208,9 +209,15 @@ func handleConnection(client net.Conn, lookupIPv4 func(context.Context, string) 
 
 	finished := make(chan error, 2)
 
-	// Forward data from the SOCKS5 client to the destination server.
+	// Forward client data to the destination, fragmenting the initial ClientHello on HTTPS connections when possible.
 	go func() {
-		_, err := io.Copy(server, client)
+		var err error
+
+		if fragment {
+			err = forwardClientTraffic(client, server, port)
+		} else {
+			_, err = io.Copy(server, client)
+		}
 
 		if closeErr := server.(*net.TCPConn).CloseWrite(); closeErr != nil && err == nil {
 			err = closeErr
@@ -247,6 +254,49 @@ func handleConnection(client net.Conn, lookupIPv4 func(context.Context, string) 
 	if secondErr != nil {
 		log.Printf("TCP relay error: %v", secondErr)
 	}
+}
+
+const initialTLSReadTimeout = 10 * time.Second
+
+// forwardClientTraffic forwards client data using the default TLS read timeout.
+func forwardClientTraffic(client net.Conn, server net.Conn, port uint16) error {
+	return forwardClientTrafficWithTimeout(
+		client,
+		server,
+		port,
+		initialTLSReadTimeout,
+	)
+}
+
+// forwardClientTrafficWithTimeout forwards client data to the destination.
+// On port 443, it attempts to fragment the initial ClientHello record using the specified read timeout before forwarding the remaining data.
+func forwardClientTrafficWithTimeout(client net.Conn, server net.Conn, port uint16, timeout time.Duration) error {
+	if port == 443 {
+		if err := client.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+			return fmt.Errorf("set initial TLS read deadline: %w", err)
+		}
+
+		forwardErr := tlsfrag.ForwardInitialRecord(server, client)
+
+		// Clear the temporary deadline before normal TCP forwarding.
+		clearErr := client.SetReadDeadline(time.Time{})
+
+		if forwardErr != nil {
+			return fmt.Errorf("forward initial TLS record: %w", forwardErr)
+		}
+
+		if clearErr != nil {
+			return fmt.Errorf("clear initial TLS read deadline: %w", clearErr)
+		}
+	}
+
+	// Once the first record is processed, relay all remaining bytes unchanged.
+	_, err := io.Copy(server, client)
+	if err != nil {
+		return fmt.Errorf("forward client traffic: %w", err)
+	}
+
+	return nil
 }
 
 // sendReply sends a SOCKS5 response with an IPv4 bind address.

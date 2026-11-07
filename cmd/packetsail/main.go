@@ -11,6 +11,7 @@ import (
 func main() {
 	version := flag.Bool("version", false, "Print version information")
 	proxy := flag.Bool("proxy", false, "Start the local SOCKS5 proxy")
+	fragment := flag.Bool("fragment", false, "Enable experimental TLS ClientHello fragmentation")
 
 	flag.Parse()
 
@@ -20,13 +21,18 @@ func main() {
 		os.Exit(2)
 	}
 
+	if *fragment && !*proxy {
+		fmt.Fprintln(os.Stderr, "Error: --fragment requires --proxy")
+		os.Exit(2)
+	}
+
 	if *version {
 		fmt.Println("PacketSail dev")
 		return
 	}
 
 	if *proxy {
-		if err := socks5.ListenAndServe("127.0.0.1:9876"); err != nil {
+		if err := socks5.ListenAndServe("127.0.0.1:9876", *fragment); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}

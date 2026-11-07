@@ -1,11 +1,14 @@
 package socks5
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"testing"
 	"time"
 )
@@ -36,7 +39,7 @@ func TestUnsupportedAuthMethod(t *testing.T) {
 			return
 		}
 
-		handleConnection(conn, testLookupIPv4)
+		handleConnection(conn, testLookupIPv4, false)
 	}()
 
 	client, err := net.Dial("tcp4", listener.Addr().String())
@@ -97,7 +100,7 @@ func TestConnectAndRelay(t *testing.T) {
 			return
 		}
 
-		handleConnection(conn, testLookupIPv4)
+		handleConnection(conn, testLookupIPv4, false)
 	}()
 
 	client, err := net.Dial("tcp4", proxyListener.Addr().String())
@@ -195,7 +198,7 @@ func TestConnectFailure(t *testing.T) {
 			return
 		}
 
-		handleConnection(conn, testLookupIPv4)
+		handleConnection(conn, testLookupIPv4, false)
 	}()
 
 	client, err := net.Dial("tcp4", proxyListener.Addr().String())
@@ -271,7 +274,7 @@ func TestConnectWithDomain(t *testing.T) {
 			return
 		}
 
-		handleConnection(conn, testLookupIPv4)
+		handleConnection(conn, testLookupIPv4, false)
 	}()
 
 	client, err := net.Dial("tcp4", proxyListener.Addr().String())
@@ -351,7 +354,7 @@ func TestEmptyDomain(t *testing.T) {
 			return
 		}
 
-		handleConnection(conn, testLookupIPv4)
+		handleConnection(conn, testLookupIPv4, false)
 	}()
 
 	client, err := net.Dial("tcp4", listener.Addr().String())
@@ -439,7 +442,7 @@ func TestConnectWithDomainFallback(t *testing.T) {
 			return
 		}
 
-		handleConnection(conn, lookup)
+		handleConnection(conn, lookup, false)
 	}()
 
 	client, err := net.Dial("tcp4", proxyListener.Addr().String())
@@ -499,5 +502,327 @@ func TestConnectWithDomainFallback(t *testing.T) {
 
 	if string(response) != string(message) {
 		t.Fatalf("unexpected payload: got %q, want %q", response, message)
+	}
+}
+
+func TestForwardClientTrafficFragmentsTLS(t *testing.T) {
+	// Construct a minimal ClientHello containing example.com as SNI.
+	hostname := []byte("example.com")
+
+	nameEntry := []byte{0x00, 0x00, byte(len(hostname))}
+	nameEntry = append(nameEntry, hostname...)
+
+	nameList := []byte{0x00, byte(len(nameEntry))}
+	nameList = append(nameList, nameEntry...)
+
+	extension := []byte{0x00, 0x00, 0x00, byte(len(nameList))}
+	extension = append(extension, nameList...)
+
+	body := make([]byte, 34)
+	body[0], body[1] = 0x03, 0x03
+
+	body = append(body,
+		0x00,                   // Session ID length.
+		0x00, 0x02, 0x13, 0x01, // One cipher suite.
+		0x01, 0x00, // One compression method.
+		0x00, byte(len(extension)),
+	)
+	body = append(body, extension...)
+
+	handshake := []byte{
+		0x01,
+		byte(len(body) >> 16),
+		byte(len(body) >> 8),
+		byte(len(body)),
+	}
+	handshake = append(handshake, body...)
+
+	original := []byte{0x16, 0x03, 0x03, 0x00, 0x00}
+	binary.BigEndian.PutUint16(original[3:5], uint16(len(handshake)))
+	original = append(original, handshake...)
+
+	// Simulate the client-to-proxy and proxy-to-server connections.
+	client, proxy := net.Pipe()
+	defer client.Close()
+	defer proxy.Close()
+
+	server, observer := net.Pipe()
+	defer server.Close()
+	defer observer.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+
+	for _, conn := range []net.Conn{client, proxy, server, observer} {
+		if err := conn.SetDeadline(deadline); err != nil {
+			t.Fatalf("set connection deadline: %v", err)
+		}
+	}
+
+	forwardDone := make(chan error, 1)
+
+	go func() {
+		forwardDone <- forwardClientTraffic(proxy, server, 443)
+	}()
+
+	writeDone := make(chan error, 1)
+
+	go func() {
+		_, err := client.Write(original)
+		writeDone <- err
+	}()
+
+	// Read one complete TLS record from the observed output.
+	readRecord := func() []byte {
+		var header [5]byte
+
+		if _, err := io.ReadFull(observer, header[:]); err != nil {
+			t.Fatalf("read TLS header: %v", err)
+		}
+
+		length := int(binary.BigEndian.Uint16(header[3:5]))
+		if length == 0 || length > 16384 {
+			t.Fatalf("invalid TLS record length: %d", length)
+		}
+
+		record := make([]byte, 5+length)
+		copy(record, header[:])
+
+		if _, err := io.ReadFull(observer, record[5:]); err != nil {
+			t.Fatalf("read TLS payload: %v", err)
+		}
+
+		return record
+	}
+
+	first := readRecord()
+	second := readRecord()
+
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write original ClientHello: %v", err)
+	}
+
+	// Send additional data after the fragmented ClientHello.
+	// This write can complete only when the proxy starts its normal io.Copy phase.
+	additional := []byte("ping")
+
+	additionalDone := make(chan error, 1)
+
+	go func() {
+		_, err := client.Write(additional)
+		additionalDone <- err
+	}()
+
+	received := make([]byte, len(additional))
+
+	if _, err := io.ReadFull(observer, received); err != nil {
+		t.Fatalf("read additional data: %v", err)
+	}
+
+	if !bytes.Equal(received, additional) {
+		t.Fatalf("unexpected additional data: got %q, want %q", received, additional)
+	}
+
+	// The additional data was relayed successfully.
+	// The proxy has already cleared its temporary read deadline.
+	if err := client.Close(); err != nil {
+		t.Fatalf("close test client: %v", err)
+	}
+
+	if err := <-forwardDone; err != nil {
+		t.Fatalf("forward client traffic: %v", err)
+	}
+
+	if first[0] != 0x16 || second[0] != 0x16 {
+		t.Fatal("expected two TLS handshake records")
+	}
+
+	reconstructed := append([]byte{}, first[5:]...)
+	reconstructed = append(reconstructed, second[5:]...)
+
+	if !bytes.Equal(reconstructed, original[5:]) {
+		t.Fatal("fragmentation changed the ClientHello payload")
+	}
+
+	// Verify that the record boundary is inside the SNI hostname.
+	hostnameStart := bytes.Index(original, hostname)
+	if hostnameStart < 0 {
+		t.Fatal("original ClientHello has no hostname")
+	}
+
+	boundary := 5 + len(first) - 5
+
+	if boundary <= hostnameStart ||
+		boundary >= hostnameStart+len(hostname) {
+		t.Fatalf("TLS split boundary %d is outside SNI", boundary)
+	}
+
+	t.Logf("original record: %d bytes", len(original))
+	t.Logf("first record: %d bytes", len(first))
+	t.Logf("second record: %d bytes", len(second))
+	t.Logf("TLS split boundary: %d", boundary)
+}
+
+func TestForwardClientTrafficPreservesNonTLS(t *testing.T) {
+	client, proxy := net.Pipe()
+	defer client.Close()
+	defer proxy.Close()
+
+	server, observer := net.Pipe()
+	defer server.Close()
+	defer observer.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+
+	for _, conn := range []net.Conn{client, proxy, server, observer} {
+		if err := conn.SetDeadline(deadline); err != nil {
+			t.Fatalf("set connection deadline: %v", err)
+		}
+	}
+
+	forwardDone := make(chan error, 1)
+
+	go func() {
+		forwardDone <- forwardClientTraffic(proxy, server, 443)
+	}()
+
+	// Begin with a byte that is not a TLS handshake record type.
+	first := []byte("G")
+
+	writeDone := make(chan error, 1)
+
+	go func() {
+		_, err := client.Write(first)
+		writeDone <- err
+	}()
+
+	receivedFirst := make([]byte, len(first))
+
+	if _, err := io.ReadFull(observer, receivedFirst); err != nil {
+		t.Fatalf("read first byte: %v", err)
+	}
+
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write first byte: %v", err)
+	}
+
+	// The remaining bytes must pass through normal TCP forwarding.
+	remaining := []byte("ET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+
+	go func() {
+		_, err := client.Write(remaining)
+		writeDone <- err
+	}()
+
+	receivedRemaining := make([]byte, len(remaining))
+
+	if _, err := io.ReadFull(observer, receivedRemaining); err != nil {
+		t.Fatalf("read remaining bytes: %v", err)
+	}
+
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write remaining bytes: %v", err)
+	}
+
+	received := append(receivedFirst, receivedRemaining...)
+	expected := append(bytes.Clone(first), remaining...)
+
+	if !bytes.Equal(received, expected) {
+		t.Fatalf("non-TLS traffic changed:\ngot  %q\nwant %q",
+			received, expected)
+	}
+
+	// The normal relay has processed the remaining bytes.
+	if err := client.Close(); err != nil {
+		t.Fatalf("close test client: %v", err)
+	}
+
+	if err := <-forwardDone; err != nil {
+		t.Fatalf("forward non-TLS traffic: %v", err)
+	}
+}
+
+func TestForwardClientTrafficRejectsIncompleteTLSHeader(t *testing.T) {
+	client, proxy := net.Pipe()
+	defer client.Close()
+	defer proxy.Close()
+
+	server, observer := net.Pipe()
+	defer server.Close()
+	defer observer.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+
+	for _, conn := range []net.Conn{client, proxy, server, observer} {
+		if err := conn.SetDeadline(deadline); err != nil {
+			t.Fatalf("set connection deadline: %v", err)
+		}
+	}
+
+	forwardDone := make(chan error, 1)
+
+	go func() {
+		forwardDone <- forwardClientTraffic(proxy, server, 443)
+	}()
+
+	// Send only two bytes of the five-byte TLS record header.
+	incomplete := []byte{0x16, 0x03}
+
+	if _, err := client.Write(incomplete); err != nil {
+		t.Fatalf("write incomplete TLS header: %v", err)
+	}
+
+	// End the input before the remaining header bytes arrive.
+	if err := client.Close(); err != nil {
+		t.Fatalf("close incomplete TLS connection: %v", err)
+	}
+
+	err := <-forwardDone
+
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("expected incomplete TLS header error, got %v", err)
+	}
+
+	t.Logf("incomplete TLS record correctly rejected: %v", err)
+}
+
+func TestForwardClientTrafficTimeout(t *testing.T) {
+	client, proxy := net.Pipe()
+	defer client.Close()
+	defer proxy.Close()
+
+	server, observer := net.Pipe()
+	defer server.Close()
+	defer observer.Close()
+
+	// Use a short timeout to keep the test fast.
+	timeout := 50 * time.Millisecond
+
+	forwardDone := make(chan error, 1)
+
+	go func() {
+		forwardDone <- forwardClientTrafficWithTimeout(
+			proxy,
+			server,
+			443,
+			timeout,
+		)
+	}()
+
+	// Send only part of a TLS record header.
+	// Keep the connection open to trigger a timeout, not EOF.
+	if _, err := client.Write([]byte{0x16, 0x03}); err != nil {
+		t.Fatalf("write incomplete TLS header: %v", err)
+	}
+
+	select {
+	case err := <-forwardDone:
+		if !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("expected timeout error, got %v", err)
+		}
+
+		t.Logf("incomplete TLS header timed out: %v", err)
+
+	case <-time.After(2 * time.Second):
+		t.Fatal("forwarding did not finish after the timeout")
 	}
 }
