@@ -22,7 +22,7 @@ This approach was selected after preliminary network experiments showed that spl
 
 **Early development**
 
-PacketSail provides a command-line interface and an experimental local SOCKS5 proxy supporting IPv4 TCP CONNECT requests and domain-name destinations.
+PacketSail provides a command-line interface with local SOCKS5 and HTTP CONNECT proxies. Both support IPv4 TCP tunneling, domain-name destinations, DNS-over-HTTPS resolution, and optional experimental TLS ClientHello fragmentation.
 
 Domain names are resolved using DNS-over-HTTPS (DoH) through Google Public DNS. The resolver uses a fixed bootstrap IPv4 address to avoid relying on system DNS for the DoH server.
 
@@ -38,7 +38,7 @@ Local tests have verified successful TLS 1.3 handshakes with fragmented ClientHe
 
 Joining a voice channel, local microphone testing, and camera preview also worked. End-to-end voice and video communication have not yet been verified.
 
-The Discord desktop application remains unsupported in the tested configuration because its updater fails to complete. Network diagnostics identified an HTTP CONNECT request being sent to PacketSail's SOCKS5-only listener.
+The Discord desktop application remains unverified because its updater fails to complete. Network diagnostics confirmed that the updater uses HTTP CONNECT. PacketSail now accepts these requests on its dedicated HTTP proxy listener, but the updater's TLS handshake still fails in the tested environment.
 
 These results reflect the tested environment and do not guarantee compatibility across all networks or Discord versions.
 
@@ -63,9 +63,11 @@ The following results were obtained on macOS using PacketSail with `--proxy --fr
 
 ### Current Desktop Limitation
 
-The Discord desktop updater was observed sending HTTP CONNECT requests to PacketSail's SOCKS5 listener. PacketSail currently supports SOCKS5 CONNECT but does not implement an HTTP CONNECT proxy.
+The Discord desktop updater has been observed using HTTP CONNECT to access `updates.discord.com`.
 
-HTTP CONNECT support is planned to investigate compatibility with applications that use this proxy protocol.
+PacketSail now supports HTTP CONNECT on `127.0.0.1:9877`. Manual tests confirmed that this proxy can establish an HTTPS tunnel to the Discord update server, complete a TLS 1.3 handshake, and receive an HTTP response.
+
+However, the Discord updater still encounters TLS connection failures, both with fragmentation enabled and disabled. The cause remains under investigation. Successful desktop application operation has not yet been verified.
 
 ### Performance Testing
 
@@ -130,6 +132,43 @@ curl -4 -I \
   https://example.com
 ```
 
+### Local HTTP CONNECT Proxy
+
+Start the local HTTP CONNECT proxy:
+
+```bash
+./bin/packetsail --http-proxy
+```
+
+PacketSail listens on `127.0.0.1:9877` and accepts HTTP/1.1 CONNECT requests for destinations on port 443.
+
+Test HTTPS connectivity through the HTTP proxy:
+
+```bash
+curl -4 -I \
+  --noproxy '' \
+  --proxy http://127.0.0.1:9877 \
+  https://updates.discord.com/
+```
+
+Enable experimental TLS fragmentation for HTTP CONNECT:
+
+```bash
+./bin/packetsail --http-proxy --fragment
+```
+
+Run both local proxies simultaneously:
+
+```bash
+./bin/packetsail --proxy --http-proxy --fragment
+```
+
+When both proxies are enabled, SOCKS5 listens on port `9876` and HTTP CONNECT listens on port `9877`. Both listeners bind to `127.0.0.1`.
+
+The HTTP proxy supports TCP tunneling through CONNECT only. It is not a general-purpose HTTP forwarding proxy. TLS fragmentation is disabled by default.
+
+Successful HTTPS connectivity through the HTTP CONNECT proxy has been verified. Compatibility with the Discord desktop updater remains under investigation.
+
 ### Experimental TLS Fragmentation
 
 Enable TLS ClientHello record fragmentation:
@@ -142,11 +181,11 @@ When enabled, PacketSail examines the initial TLS handshake record for connectio
 
 The feature is experimental and may not work with all TLS implementations, network conditions, or ClientHello formats.
 
-TLS fragmentation is disabled by default. Use `--proxy` without `--fragment` to run the proxy without TLS record modification.
+TLS fragmentation is disabled by default. Omit `--fragment` to run either proxy without TLS record modification.
 
 Stop the proxy using `Ctrl+C`.
 
-**Limitations:** The DNS resolver supports IPv4 A records through a single DoH provider with a fixed bootstrap IP address. TLS fragmentation currently targets port 443 and supports only certain ClientHello layouts. DPI circumvention is not guaranteed. The proxy is intended for local experimental use.
+**Limitations:** PacketSail currently supports IPv4 TCP connections only. The DNS resolver uses a single DNS-over-HTTPS provider with a fixed bootstrap IPv4 address. The SOCKS5 proxy does not support authentication, UDP relay, or IPv6 destinations. The HTTP CONNECT proxy supports only destinations on port 443 and does not implement general HTTP forwarding or proxy authentication. TLS fragmentation is experimental and supports only certain ClientHello layouts. DPI circumvention and desktop application compatibility are not guaranteed. PacketSail is intended for local experimental use.
 
 ## License
 
