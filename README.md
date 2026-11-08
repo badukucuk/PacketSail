@@ -34,9 +34,44 @@ TLS fragmentation is disabled by default. Unsupported ClientHello formats are fo
 
 Local tests have verified successful TLS 1.3 handshakes with fragmented ClientHello records, and manual HTTPS connectivity tests have succeeded in both proxy modes.
 
-**DPI circumvention and Discord connectivity have not yet been verified using PacketSail.**
+**Discord web connectivity has been successfully verified on macOS using PacketSail with TLS fragmentation enabled.** Testing on a restricted network confirmed successful HTTPS connections, authenticated web access, direct and server messaging, file transfers, and Discord Gateway WebSocket connectivity.
+
+Joining a voice channel, local microphone testing, and camera preview also worked. End-to-end voice and video communication have not yet been verified.
+
+The Discord desktop application remains unsupported in the tested configuration because its updater fails to complete. Network diagnostics identified an HTTP CONNECT request being sent to PacketSail's SOCKS5-only listener.
+
+These results reflect the tested environment and do not guarantee compatibility across all networks or Discord versions.
 
 IPv6 destinations, UDP relay, and SOCKS5 authentication are not supported.
+
+## Verified Connectivity
+
+The following results were obtained on macOS using PacketSail with `--proxy --fragment` enabled.
+
+| Test | Result |
+|---|---|
+| Discord HTTPS | Successful |
+| Discord web login | Successful |
+| Direct and server messaging | Successful |
+| File transfers | Successful |
+| Gateway WebSocket upgrade and Hello | Successful |
+| Voice channel connection | Successful |
+| Local microphone test | Successful |
+| Camera preview | Successful |
+| End-to-end voice/video communication | Not yet verified |
+| Discord desktop application | Updater failure |
+
+### Current Desktop Limitation
+
+The Discord desktop updater was observed sending HTTP CONNECT requests to PacketSail's SOCKS5 listener. PacketSail currently supports SOCKS5 CONNECT but does not implement an HTTP CONNECT proxy.
+
+HTTP CONNECT support is planned to investigate compatibility with applications that use this proxy protocol.
+
+### Performance Testing
+
+A Discord voice connection latency of approximately 112 ms was observed on a café Wi-Fi network. This is an initial observation, not a PacketSail performance benchmark.
+
+Latency, packet loss, and connection stability will be evaluated again on a home network.
 
 ## Building
 
