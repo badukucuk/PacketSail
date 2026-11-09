@@ -10,11 +10,14 @@ import (
 	"github.com/badukucuk/PacketSail/internal/tlsfrag"
 )
 
+const version = "v0.1.0"
+
 func main() {
-	version := flag.Bool("version", false, "Print version information")
+	showVersion := flag.Bool("version", false, "Print version information")
 	proxy := flag.Bool("proxy", false, "Start the local SOCKS5 proxy")
 	httpProxy := flag.Bool("http-proxy", false, "Start the local HTTP CONNECT proxy")
 	fragment := flag.Bool("fragment", false, "Enable experimental TLS ClientHello fragmentation")
+	debug := flag.Bool("debug", false, "Log HTTP CONNECT connection diagnostics")
 
 	fragmentStrategy := flag.String(
 		"fragment-strategy",
@@ -68,8 +71,8 @@ func main() {
 		os.Exit(2)
 	}
 
-	if *version {
-		fmt.Println("PacketSail dev")
+	if *showVersion {
+		fmt.Println("PacketSail", version)
 		return
 	}
 
@@ -98,6 +101,7 @@ func main() {
 				"127.0.0.1:9877",
 				*fragment,
 				strategy,
+				*debug,
 			)
 		}()
 	}

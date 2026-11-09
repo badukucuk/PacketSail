@@ -825,3 +825,91 @@ func TestConnectPreservesHalfClose(t *testing.T) {
 		})
 	}
 }
+
+func TestDebugLogging(t *testing.T) {
+	var output bytes.Buffer
+
+	// Preserve the global logger to avoid affecting other tests.
+	originalOutput := log.Writer()
+	originalFlags := log.Flags()
+	originalPrefix := log.Prefix()
+
+	log.SetOutput(&output)
+	log.SetFlags(0)
+	log.SetPrefix("")
+
+	t.Cleanup(func() {
+		log.SetOutput(originalOutput)
+		log.SetFlags(originalFlags)
+		log.SetPrefix(originalPrefix)
+	})
+
+	h := &handler{}
+
+	// Diagnostics must produce no output by default.
+	h.debugf(
+		42,
+		"requested: %s, client: %s",
+		"example.com:443",
+		"127.0.0.1:54879",
+	)
+
+	if got := output.String(); got != "" {
+		t.Fatalf("debug disabled, unexpected output: %q", got)
+	}
+
+	// Enabling diagnostics must include the connection identifier.
+	h.debug = true
+
+	h.debugf(
+		42,
+		"requested: %s, client: %s",
+		"example.com:443",
+		"127.0.0.1:54879",
+	)
+
+	want := "[CONNECT 42] requested: example.com:443, client: 127.0.0.1:54879\n"
+
+	if got := output.String(); got != want {
+		t.Fatalf(
+			"unexpected debug output:\ngot:  %q\nwant: %q",
+			got,
+			want,
+		)
+	}
+}
+
+func TestIsAllowedConnectDestination(t *testing.T) {
+	tests := []struct {
+		name    string
+		host    string
+		port    string
+		allowed bool
+	}{
+		{"standard HTTPS", "example.com", "443", true},
+		{"Discord voice 2053", "c-otp02.discord.media", "2053", true},
+		{"Discord voice 2083", "c-otp02.discord.media", "2083", true},
+		{"Discord voice 2087", "c-otp02.discord.media", "2087", true},
+		{"Discord voice 2096", "c-otp02.discord.media", "2096", true},
+		{"Discord voice 8443", "c-otp02.discord.media", "8443", true},
+		{"other domain", "example.com", "2053", false},
+		{"similar domain", "discord.media.example.com", "2087", false},
+		{"unsupported port", "c-otp02.discord.media", "22", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isAllowedConnectDestination(tt.host, tt.port)
+
+			if got != tt.allowed {
+				t.Errorf(
+					"isAllowedConnectDestination(%q, %q) = %t, want %t",
+					tt.host,
+					tt.port,
+					got,
+					tt.allowed,
+				)
+			}
+		})
+	}
+}
