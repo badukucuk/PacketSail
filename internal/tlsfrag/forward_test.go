@@ -157,3 +157,64 @@ func TestForwardInitialNonTLSTraffic(t *testing.T) {
 		t.Fatalf("unexpected remaining data: %q", remaining)
 	}
 }
+
+type recordingWriter struct {
+	writes [][]byte
+}
+
+func (w *recordingWriter) Write(p []byte) (int, error) {
+	w.writes = append(w.writes, bytes.Clone(p))
+	return len(p), nil
+}
+
+func TestForwardInitialRecordDualSplit(t *testing.T) {
+	original := makeTestClientHello("example.com")
+
+	var writer recordingWriter
+
+	err := ForwardInitialRecordWithStrategy(
+		&writer,
+		bytes.NewReader(original),
+		StrategyDualSplit,
+	)
+	if err != nil {
+		t.Fatalf("forward ClientHello: %v", err)
+	}
+
+	if len(writer.writes) != 2 {
+		t.Fatalf(
+			"expected 2 writes, got %d",
+			len(writer.writes),
+		)
+	}
+
+	if len(writer.writes[0]) != 2 {
+		t.Fatalf(
+			"expected first write to contain 2 bytes, got %d",
+			len(writer.writes[0]),
+		)
+	}
+
+	hostname, offset, err := FindServerName(original)
+	if err != nil {
+		t.Fatalf("find SNI: %v", err)
+	}
+
+	if hostname != "example.com" {
+		t.Fatalf("unexpected hostname: %q", hostname)
+	}
+
+	expected, err := SplitClientHelloRecord(
+		original,
+		offset-recordHeaderSize+1,
+	)
+	if err != nil {
+		t.Fatalf("split ClientHello: %v", err)
+	}
+
+	actual := bytes.Join(writer.writes, nil)
+
+	if !bytes.Equal(actual, expected) {
+		t.Fatal("forwarded data differs from expected TLS records")
+	}
+}

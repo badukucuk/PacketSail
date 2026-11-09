@@ -30,10 +30,11 @@ When multiple IPv4 addresses are returned, PacketSail attempts TCP connections s
 
 PacketSail also supports **experimental TLS ClientHello record fragmentation**, which can be enabled using the `--fragment` flag. For connections targeting port 443, the proxy examines the initial ClientHello and attempts to split it into two TLS handshake records without modifying the original handshake payload.
 
-Two fragmentation strategies are supported:
+Three fragmentation strategies are supported:
 
-- `sni-midpoint` (default): Splits the ClientHello inside the SNI hostname.
+- `sni-midpoint` (default): Splits the ClientHello in the middle of the SNI hostname.
 - `before-sni`: Splits the ClientHello immediately before the SNI hostname.
+- `dual-split`: Splits the TLS record one byte into the SNI hostname and sends the first two bytes separately from the remaining data.
 
 The strategy can be selected using `--fragment-strategy`. TLS fragmentation is disabled by default. Unsupported ClientHello formats are forwarded without modification when possible.
 
@@ -43,7 +44,7 @@ Local tests have verified successful TLS 1.3 handshakes with fragmented ClientHe
 
 Joining a voice channel, local microphone testing, and camera preview also worked. End-to-end voice and video communication have not yet been verified.
 
-The Discord desktop application remains unverified because its updater fails to complete. Network diagnostics confirmed that the updater uses HTTP CONNECT. PacketSail now accepts these requests on its dedicated HTTP proxy listener, but the updater's TLS handshake still fails in the tested environment.
+Discord desktop connectivity has been successfully verified on macOS using the experimental `dual-split` strategy. The application completed its updater process, reached the login screen, and successfully connected to Discord. Direct messaging, media uploads, and voice communication were also verified in the tested environment.
 
 These results reflect the tested environment and do not guarantee compatibility across all networks or Discord versions.
 
@@ -51,46 +52,46 @@ IPv6 destinations, UDP relay, and SOCKS5 authentication are not supported.
 
 ## Verified Connectivity
 
-The following results were obtained on macOS using PacketSail with `--proxy --fragment` enabled.
+The following results were obtained on macOS using PacketSail with TLS fragmentation enabled. Discord desktop tests used the experimental `dual-split` strategy with the HTTP CONNECT proxy.
 
 | Test | Result |
 |---|---|
 | Discord HTTPS | Successful |
 | Discord web login | Successful |
-| Direct and server messaging | Successful |
+| Discord web messaging | Successful |
 | File transfers | Successful |
-| Gateway WebSocket upgrade and Hello | Successful |
-| Voice channel connection | Successful |
-| Local microphone test | Successful |
+| Gateway WebSocket connectivity | Successful |
+| Discord desktop update | Successful |
+| Discord desktop login | Successful |
+| Discord desktop direct messaging | Successful |
+| Discord desktop media uploads | Successful |
+| Discord desktop voice channel connection | Successful after retry |
+| Discord desktop voice communication | Successful |
 | Camera preview | Successful |
-| End-to-end voice/video communication | Not yet verified |
-| Discord desktop application | Updater failure |
+| End-to-end video communication | Not yet verified |
+| Screen sharing | Not yet verified |
+| Long-term connection stability | Not yet verified |
+| Home network compatibility | Not yet verified |
 
-### Current Desktop Limitation
+### Discord Desktop Compatibility
 
-The Discord desktop updater has been observed using HTTP CONNECT to access `updates.discord.com`.
+Discord desktop connectivity was successfully verified on macOS using PacketSail's experimental `dual-split` fragmentation strategy.
 
-PacketSail supports HTTP CONNECT on `127.0.0.1:9877`. Manual tests confirmed that this proxy can establish an HTTPS tunnel to the Discord update server, complete a TLS 1.3 handshake, and receive an HTTP response.
+The Discord updater completed successfully, and the application reached its login screen. Login, direct messaging, media uploads, and voice communication were subsequently verified.
 
-However, the Discord updater still encounters TLS connection failures in the tested environment.
+The voice connection initially remained in the Connecting state but succeeded on a later attempt. Packet captures showed bidirectional UDP traffic during the successful voice session.
 
-Network diagnostics confirmed that the updater's ClientHello was fragmented and that the remote endpoint responded with a TLS ServerHello before the TCP connection was reset.
+PacketSail does not currently implement UDP relay. The observed voice UDP traffic was transmitted directly over the network rather than through PacketSail's TCP proxy.
 
-Similar updater failures were observed on both Wi-Fi and a mobile hotspot. Direct TLS connections to the tested destination also encountered connection resets.
-
-Successful Discord desktop application operation remains unverified.
-
-The `before-sni` fragmentation strategy has also been tested against the Discord desktop updater. Both `sni-midpoint` and `before-sni` continue to produce TLS connection failures in the tested environment.
-
-Manual HTTPS tests successfully complete TLS 1.3 handshakes with both strategies. TLS 1.2 connections, however, fail after receiving a ServerHello.
-
-The underlying cause remains unresolved. Additional fragmentation strategies will be considered after further protocol compatibility testing.
+These results were obtained on a café Wi-Fi network. Compatibility and long-term connection stability across other networks remain unverified.
 
 ### Performance Testing
 
-A Discord voice connection latency of approximately 112 ms was observed on a café Wi-Fi network. This is an initial observation, not a PacketSail performance benchmark.
+An average Discord voice connection latency of approximately 104 ms was observed on a café Wi-Fi network during successful desktop voice communication.
 
-Latency, packet loss, and connection stability will be evaluated again on a home network.
+This is an application-reported observation, not a controlled PacketSail performance benchmark. It does not establish PacketSail's latency overhead.
+
+Connectivity, average latency, packet loss, voice stability, and reconnection behavior will be tested again on a home network.
 
 ## Building
 
@@ -184,7 +185,7 @@ When both proxies are enabled, SOCKS5 listens on port `9876` and HTTP CONNECT li
 
 The HTTP proxy supports TCP tunneling through CONNECT only. It is not a general-purpose HTTP forwarding proxy. TLS fragmentation is disabled by default.
 
-Successful HTTPS connectivity through the HTTP CONNECT proxy has been verified. Compatibility with the Discord desktop updater remains under investigation.
+Successful HTTPS connectivity through the HTTP CONNECT proxy has been verified. Discord desktop updating, login, messaging, media uploads, and voice communication have also been verified using the experimental `dual-split` strategy in the tested environment.
 
 ### Experimental TLS Fragmentation
 
@@ -196,12 +197,13 @@ Fragmentation is disabled by default.
 
 #### Fragmentation Strategies
 
-Two strategies are available:
+Three strategies are available:
 
 | Strategy | Description |
 |---|---|
 | `sni-midpoint` | Splits the ClientHello in the middle of the SNI hostname. This is the default strategy. |
 | `before-sni` | Splits the ClientHello immediately before the SNI hostname. |
+| `dual-split` | Splits the TLS record one byte into the SNI hostname and sends the first two bytes separately from the remaining data. |
 
 **Default strategy**
 
@@ -227,6 +229,21 @@ Select the alternative strategy:
   --fragment-strategy=before-sni
 ```
 
+**Dual Split strategy**
+
+Enable the experimental `dual-split` strategy:
+
+```bash
+./bin/packetsail --http-proxy --fragment \
+  --fragment-strategy=dual-split
+```
+
+The `dual-split` strategy combines TLS record fragmentation with separate TCP write operations.
+
+It splits the ClientHello one byte into the SNI hostname and sends the first two bytes of the resulting data separately from the remaining bytes.
+
+Separate write operations do not guarantee separate TCP segments, as TCP segmentation is controlled by the operating system.
+
 **HTTP CONNECT proxy**
 
 Enable the alternative strategy for HTTP CONNECT:
@@ -251,15 +268,27 @@ Omitting `--fragment-strategy` preserves the existing `sni-midpoint` behavior.
 
 #### Validation
 
-Local tests have verified that both strategies preserve the original ClientHello handshake payload.
+Local tests have verified that all three fragmentation strategies (`sni-midpoint`, `before-sni`, and `dual-split`) preserve the original ClientHello handshake payload.
 
-Local TLS 1.2 and TLS 1.3 handshake tests have also succeeded with multiple fragmentation positions.
+The `dual-split` strategy has successfully passed its unit test, verifying TLS record fragmentation one byte into the SNI hostname, separate write operations, and the integrity of the resulting TLS records.
+
+Local TLS 1.2 and TLS 1.3 handshake tests have succeeded with multiple fragmentation positions.
 
 These tests validate local TLS compatibility but do not guarantee successful DPI circumvention or compatibility with every TLS implementation.
 
 Discord web connectivity has been verified using the default `sni-midpoint` strategy.
 
-Both fragmentation strategies have been tested against the Discord desktop updater in a restricted network. Neither has resolved the updater's TLS connection failures.
+The `sni-midpoint` and `before-sni` strategies did not resolve the Discord desktop updater's TLS connection failures in the tested environment.
+
+The experimental `dual-split` strategy successfully completed a TLS 1.2 connection to the Discord update server and retrieved the update manifest with an HTTP 200 response.
+
+Subsequent Discord desktop testing verified successful application updating, login, direct messaging, media uploads, voice channel connectivity, and bidirectional voice communication.
+
+The initial desktop voice connection attempt remained in the Connecting state, but a subsequent attempt succeeded. Packet captures confirmed bidirectional UDP traffic during the successful voice session.
+
+An average Discord voice latency of approximately 104 ms was observed on a café Wi-Fi network. This is an application-reported observation, not a controlled PacketSail performance benchmark.
+
+These results do not guarantee compatibility across all networks or Discord versions. Long-term connection stability and performance on a home network have not yet been verified.
 
 #### Limitations
 
@@ -272,6 +301,8 @@ The SOCKS5 proxy does not support authentication, UDP relay, or IPv6 destination
 The HTTP CONNECT proxy supports only destinations on port 443 and does not implement general HTTP forwarding or proxy authentication.
 
 TLS fragmentation is experimental and supports only certain ClientHello layouts. Unsupported records are forwarded unchanged when possible.
+
+The `dual-split` strategy uses separate TCP write operations, but the operating system ultimately controls TCP segmentation. PacketSail does not guarantee that these writes will produce separate TCP packets.
 
 DPI circumvention and Discord desktop application compatibility are not guaranteed.
 

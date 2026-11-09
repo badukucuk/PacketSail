@@ -19,7 +19,7 @@ func main() {
 	fragmentStrategy := flag.String(
 		"fragment-strategy",
 		string(tlsfrag.StrategySNIMidpoint),
-		"TLS fragmentation strategy: sni-midpoint or before-sni",
+		"TLS fragmentation strategy: sni-midpoint, before-sni, or dual-split",
 	)
 
 	flag.Parse()
@@ -38,8 +38,7 @@ func main() {
 	strategy := tlsfrag.Strategy(*fragmentStrategy)
 
 	switch strategy {
-	case tlsfrag.StrategySNIMidpoint, tlsfrag.StrategyBeforeSNI:
-		// Both strategies are supported
+	case tlsfrag.StrategySNIMidpoint, tlsfrag.StrategyBeforeSNI, tlsfrag.StrategyDualSplit:
 	default:
 		fmt.Fprintf(
 			os.Stderr,
@@ -48,7 +47,7 @@ func main() {
 		)
 		fmt.Fprintln(
 			os.Stderr,
-			"Supported strategies: sni-midpoint, before-sni",
+			"Supported strategies: sni-midpoint, before-sni, dual-split",
 		)
 		os.Exit(2)
 	}

@@ -13,6 +13,7 @@ type Strategy string
 const (
 	StrategySNIMidpoint Strategy = "sni-midpoint"
 	StrategyBeforeSNI   Strategy = "before-sni"
+	StrategyDualSplit   Strategy = "dual-split"
 )
 
 // ForwardInitialRecord preserves the existing default behavior.
@@ -31,7 +32,7 @@ func ForwardInitialRecordWithStrategy(
 	strategy Strategy,
 ) error {
 	switch strategy {
-	case StrategySNIMidpoint, StrategyBeforeSNI:
+	case StrategySNIMidpoint, StrategyBeforeSNI, StrategyDualSplit:
 	default:
 		return fmt.Errorf("unsupported TLS fragmentation strategy: %q", strategy)
 	}
@@ -87,13 +88,28 @@ func ForwardInitialRecordWithStrategy(
 		switch strategy {
 		case StrategySNIMidpoint:
 			splitAt = sniStart + len(hostname)/2
+
 		case StrategyBeforeSNI:
 			splitAt = sniStart
+
+		case StrategyDualSplit:
+			splitAt = sniStart + 1
 		}
 
 		fragmented, splitErr := SplitClientHelloRecord(record, splitAt)
 		if splitErr == nil {
 			output = fragmented
+
+			if strategy == StrategyDualSplit {
+				// Send the first two bytes separately to reproduce
+				// the selected TCP write pattern.
+				if _, err := io.Copy(dst, bytes.NewReader(output[:2])); err != nil {
+					return err
+				}
+
+				_, err := io.Copy(dst, bytes.NewReader(output[2:]))
+				return err
+			}
 		}
 	}
 
