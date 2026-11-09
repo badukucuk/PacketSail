@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"testing"
@@ -867,5 +868,63 @@ func TestForwardClientTrafficTimeout(t *testing.T) {
 
 	case <-time.After(2 * time.Second):
 		t.Fatal("forwarding did not finish after the timeout")
+	}
+}
+
+func TestLogRelayErrors(t *testing.T) {
+	resetErr := errors.New("connection reset by peer")
+	otherErr := errors.New("unexpected relay failure")
+	closedErr := fmt.Errorf("read connection: %w", net.ErrClosed)
+
+	tests := []struct {
+		name       string
+		firstErr   error
+		secondErr  error
+		wantOutput string
+	}{
+		{
+			name: "no errors",
+		},
+		{
+			name:       "first error only",
+			firstErr:   resetErr,
+			wantOutput: "TCP relay error: connection reset by peer\n",
+		},
+		{
+			name:       "secondary closed connection",
+			firstErr:   resetErr,
+			secondErr:  closedErr,
+			wantOutput: "TCP relay error: connection reset by peer\n",
+		},
+		{
+			name:      "two independent errors",
+			firstErr:  resetErr,
+			secondErr: otherErr,
+			wantOutput: "TCP relay error: connection reset by peer\n" +
+				"TCP relay error: unexpected relay failure\n",
+		},
+		{
+			name:      "second error without first failure",
+			secondErr: closedErr,
+			wantOutput: "TCP relay error: read connection: " +
+				net.ErrClosed.Error() + "\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var output bytes.Buffer
+			logger := log.New(&output, "", 0)
+
+			logRelayErrors(logger, tt.firstErr, tt.secondErr)
+
+			if got := output.String(); got != tt.wantOutput {
+				t.Fatalf(
+					"unexpected relay logs:\ngot:  %q\nwant: %q",
+					got,
+					tt.wantOutput,
+				)
+			}
+		})
 	}
 }

@@ -2,6 +2,7 @@ package httpproxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -190,17 +191,34 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	firstErr := <-finished
+
 	if firstErr != nil {
+		// Stop the other relay direction after a transfer failure.
 		client.Close()
 		upstream.Close()
 	}
 
 	secondErr := <-finished
 
+	logRelayErrors(log.Default(), firstErr, secondErr)
+}
+
+// logRelayErrors reports transfer failures while suppressing a
+// secondary closed-connection error caused by stopping the relay.
+func logRelayErrors(logger *log.Logger, firstErr, secondErr error) {
 	if firstErr != nil {
-		log.Printf("HTTP CONNECT relay error: %v", firstErr)
+		logger.Printf("HTTP CONNECT relay error: %v", firstErr)
 	}
-	if secondErr != nil {
-		log.Printf("HTTP CONNECT relay error: %v", secondErr)
+
+	if secondErr == nil {
+		return
 	}
+
+	// The first failure caused both connections to close.
+	// A subsequent net.ErrClosed is an expected consequence.
+	if firstErr != nil && errors.Is(secondErr, net.ErrClosed) {
+		return
+	}
+
+	logger.Printf("HTTP CONNECT relay error: %v", secondErr)
 }

@@ -6,8 +6,10 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -572,6 +574,66 @@ func TestConnectFragmentsRealClientHello(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			testConnectFragmentsRealClientHello(t, tt.strategy)
+		})
+	}
+}
+
+func TestLogRelayErrors(t *testing.T) {
+	resetErr := errors.New("connection reset by peer")
+	otherErr := errors.New("unexpected relay failure")
+	closedErr := fmt.Errorf("read connection: %w", net.ErrClosed)
+
+	tests := []struct {
+		name       string
+		firstErr   error
+		secondErr  error
+		wantOutput string
+	}{
+		{
+			name: "no errors",
+		},
+		{
+			name:       "first error only",
+			firstErr:   resetErr,
+			wantOutput: "HTTP CONNECT relay error: connection reset by peer\n",
+		},
+		{
+			name:       "secondary closed connection",
+			firstErr:   resetErr,
+			secondErr:  closedErr,
+			wantOutput: "HTTP CONNECT relay error: connection reset by peer\n",
+		},
+		{
+			name:      "two independent errors",
+			firstErr:  resetErr,
+			secondErr: otherErr,
+			wantOutput: "HTTP CONNECT relay error: connection reset by peer\n" +
+				"HTTP CONNECT relay error: unexpected relay failure\n",
+		},
+		{
+			name:      "second error without first failure",
+			secondErr: closedErr,
+			wantOutput: "HTTP CONNECT relay error: read connection: " +
+				net.ErrClosed.Error() + "\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var output bytes.Buffer
+
+			// Use an isolated logger to avoid changing global logging.
+			logger := log.New(&output, "", 0)
+
+			logRelayErrors(logger, tt.firstErr, tt.secondErr)
+
+			if got := output.String(); got != tt.wantOutput {
+				t.Fatalf(
+					"unexpected relay logs:\ngot:  %q\nwant: %q",
+					got,
+					tt.wantOutput,
+				)
+			}
 		})
 	}
 }

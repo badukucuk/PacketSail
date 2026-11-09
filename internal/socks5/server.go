@@ -3,6 +3,7 @@ package socks5
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -252,13 +253,7 @@ func handleConnection(
 
 	secondErr := <-finished
 
-	if firstErr != nil {
-		log.Printf("TCP relay error: %v", firstErr)
-	}
-
-	if secondErr != nil {
-		log.Printf("TCP relay error: %v", secondErr)
-	}
+	logRelayErrors(log.Default(), firstErr, secondErr)
 }
 
 const initialTLSReadTimeout = 10 * time.Second
@@ -345,4 +340,24 @@ func sendReply(client net.Conn, status byte, addr *net.TCPAddr) error {
 	}
 
 	return nil
+}
+
+// logRelayErrors reports actual relay failures while ignoring
+// a secondary closed-connection error after an earlier failure.
+func logRelayErrors(logger *log.Logger, firstErr, secondErr error) {
+	if firstErr != nil {
+		logger.Printf("TCP relay error: %v", firstErr)
+	}
+
+	if secondErr == nil {
+		return
+	}
+
+	// The first error causes both connections to close.
+	// A subsequent net.ErrClosed is therefore expected.
+	if firstErr != nil && errors.Is(secondErr, net.ErrClosed) {
+		return
+	}
+
+	logger.Printf("TCP relay error: %v", secondErr)
 }
