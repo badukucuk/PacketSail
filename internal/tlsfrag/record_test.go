@@ -334,110 +334,584 @@ func TestSplitRealClientHelloAtSNI(t *testing.T) {
 }
 
 func TestFragmentedClientHelloHandshake(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	certificate := server.Certificate()
-	if len(certificate.DNSNames) == 0 {
-		t.Fatal("test certificate has no DNS names")
+	versions := []struct {
+		name    string
+		version uint16
+	}{
+		{"TLS 1.2", tls.VersionTLS12},
+		{"TLS 1.3", tls.VersionTLS13},
 	}
 
-	hostname := certificate.DNSNames[0]
+	for _, version := range versions {
+		t.Run(version.name, func(t *testing.T) {
+			server := httptest.NewUnstartedServer(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+				}),
+			)
 
-	roots := x509.NewCertPool()
-	roots.AddCert(certificate)
+			server.TLS = &tls.Config{
+				MinVersion: version.version,
+				MaxVersion: version.version,
+			}
+			server.StartTLS()
+			defer server.Close()
 
-	upstream, err := net.Dial("tcp", server.Listener.Addr().String())
+			certificate := server.Certificate()
+			if len(certificate.DNSNames) == 0 {
+				t.Fatal("test certificate has no DNS names")
+			}
+
+			hostname := certificate.DNSNames[0]
+
+			roots := x509.NewCertPool()
+			roots.AddCert(certificate)
+
+			positions := []struct {
+				name    string
+				splitAt func(offset, hostnameLength int) int
+			}{
+				{
+					name: "after handshake header",
+					splitAt: func(offset, hostnameLength int) int {
+						return 4
+					},
+				},
+				{
+					name: "before SNI",
+					splitAt: func(offset, hostnameLength int) int {
+						return offset - recordHeaderSize
+					},
+				},
+				{
+					name: "middle of SNI",
+					splitAt: func(offset, hostnameLength int) int {
+						return offset - recordHeaderSize + hostnameLength/2
+					},
+				},
+			}
+
+			for _, position := range positions {
+				t.Run(position.name, func(t *testing.T) {
+					upstream, err := net.Dial(
+						"tcp",
+						server.Listener.Addr().String(),
+					)
+					if err != nil {
+						t.Fatalf("connect to TLS server: %v", err)
+					}
+					defer upstream.Close()
+
+					clientSide, proxySide := net.Pipe()
+					defer proxySide.Close()
+
+					client := tls.Client(clientSide, &tls.Config{
+						ServerName: hostname,
+						RootCAs:    roots,
+						MinVersion: version.version,
+						MaxVersion: version.version,
+					})
+					defer client.Close()
+
+					deadline := time.Now().Add(5 * time.Second)
+
+					if err := client.SetDeadline(deadline); err != nil {
+						t.Fatalf("set client deadline: %v", err)
+					}
+
+					if err := upstream.SetDeadline(deadline); err != nil {
+						t.Fatalf("set upstream deadline: %v", err)
+					}
+
+					forwarded := make(chan error, 1)
+
+					go func() {
+						var header [recordHeaderSize]byte
+
+						if _, err := io.ReadFull(proxySide, header[:]); err != nil {
+							forwarded <- err
+							return
+						}
+
+						length := int(binary.BigEndian.Uint16(header[3:5]))
+						if length == 0 || length > maxPlaintextSize {
+							forwarded <- fmt.Errorf(
+								"invalid TLS record length: %d",
+								length,
+							)
+							return
+						}
+
+						record := make([]byte, recordHeaderSize+length)
+						copy(record, header[:])
+
+						if _, err := io.ReadFull(
+							proxySide,
+							record[recordHeaderSize:],
+						); err != nil {
+							forwarded <- err
+							return
+						}
+
+						name, offset, err := FindServerName(record)
+						if err != nil {
+							forwarded <- err
+							return
+						}
+
+						splitAt := position.splitAt(offset, len(name))
+
+						fragmented, err := SplitClientHelloRecord(
+							record,
+							splitAt,
+						)
+						if err != nil {
+							forwarded <- err
+							return
+						}
+
+						if _, err := io.Copy(
+							upstream,
+							bytes.NewReader(fragmented),
+						); err != nil {
+							forwarded <- err
+							return
+						}
+
+						forwarded <- nil
+
+						// Continue the remaining handshake in both directions.
+						go io.Copy(proxySide, upstream)
+						io.Copy(upstream, proxySide)
+					}()
+
+					handshakeErr := client.Handshake()
+					forwardErr := <-forwarded
+
+					if forwardErr != nil {
+						t.Fatalf(
+							"forward fragmented ClientHello: %v",
+							forwardErr,
+						)
+					}
+
+					if handshakeErr != nil {
+						t.Fatalf(
+							"TLS handshake failed: %v",
+							handshakeErr,
+						)
+					}
+
+					state := client.ConnectionState()
+
+					if state.Version != version.version {
+						t.Fatalf(
+							"negotiated version: got 0x%04x, want 0x%04x",
+							state.Version,
+							version.version,
+						)
+					}
+
+					if len(state.VerifiedChains) == 0 {
+						t.Fatal("TLS certificate was not verified")
+					}
+
+					t.Logf(
+						"handshake completed with TLS version 0x%04x",
+						state.Version,
+					)
+				})
+			}
+		})
+	}
+}
+
+func TestSplitUpdaterShapedClientHello(t *testing.T) {
+	const (
+		hostname   = "updates.discord.com"
+		recordSize = 179
+	)
+
+	// Start with a valid ClientHello containing an SNI extension.
+	original := makeTestClientHello(hostname)
+
+	// Add a padding extension to construct a 179-byte record.
+	paddingLength := recordSize - len(original) - 4
+	if paddingLength < 0 {
+		t.Fatal("base ClientHello exceeds target record size")
+	}
+
+	paddingExtension := make([]byte, 4+paddingLength)
+	binary.BigEndian.PutUint16(paddingExtension[0:2], 0x0015)
+	binary.BigEndian.PutUint16(
+		paddingExtension[2:4],
+		uint16(paddingLength),
+	)
+
+	// Locate the extensions length field in our test fixture.
+	// The fixture contains a fixed-size session ID, cipher suite
+	// and compression methods section before its extensions.
+	const extensionsLengthOffset = 50
+
+	oldExtensionsLength := int(binary.BigEndian.Uint16(
+		original[extensionsLengthOffset : extensionsLengthOffset+2],
+	))
+
+	original = append(original, paddingExtension...)
+
+	binary.BigEndian.PutUint16(
+		original[extensionsLengthOffset:extensionsLengthOffset+2],
+		uint16(oldExtensionsLength+len(paddingExtension)),
+	)
+
+	// Update the TLS record and handshake lengths.
+	binary.BigEndian.PutUint16(
+		original[3:5],
+		uint16(len(original)-5),
+	)
+
+	handshakeLength := len(original) - 9
+	original[6] = byte(handshakeLength >> 16)
+	original[7] = byte(handshakeLength >> 8)
+	original[8] = byte(handshakeLength)
+
+	// Match the record-layer version observed in the updater.
+	original[2] = 0x01
+
+	if len(original) != recordSize {
+		t.Fatalf(
+			"unexpected ClientHello size: got %d, want %d",
+			len(original),
+			recordSize,
+		)
+	}
+
+	name, offset, err := FindServerName(original)
 	if err != nil {
-		t.Fatalf("connect to test TLS server: %v", err)
-	}
-	defer upstream.Close()
-
-	clientSide, proxySide := net.Pipe()
-	defer proxySide.Close()
-
-	client := tls.Client(clientSide, &tls.Config{
-		ServerName: hostname,
-		RootCAs:    roots,
-		MinVersion: tls.VersionTLS12,
-	})
-	defer client.Close()
-
-	deadline := time.Now().Add(5 * time.Second)
-	if err := client.SetDeadline(deadline); err != nil {
-		t.Fatalf("set TLS client deadline: %v", err)
-	}
-	if err := upstream.SetDeadline(deadline); err != nil {
-		t.Fatalf("set upstream deadline: %v", err)
+		t.Fatalf("find updater-shaped ClientHello SNI: %v", err)
 	}
 
-	forwarded := make(chan error, 1)
-
-	go func() {
-		var header [5]byte
-		if _, err := io.ReadFull(proxySide, header[:]); err != nil {
-			forwarded <- err
-			return
-		}
-
-		length := int(binary.BigEndian.Uint16(header[3:5]))
-		if length == 0 || length > maxPlaintextSize {
-			forwarded <- fmt.Errorf("invalid initial TLS record length: %d", length)
-			return
-		}
-
-		record := make([]byte, 5+length)
-		copy(record[:5], header[:])
-
-		if _, err := io.ReadFull(proxySide, record[5:]); err != nil {
-			forwarded <- err
-			return
-		}
-
-		name, offset, err := FindServerName(record)
-		if err != nil {
-			forwarded <- err
-			return
-		}
-
-		splitAt := offset - 5 + len(name)/2
-
-		fragmented, err := SplitClientHelloRecord(record, splitAt)
-		if err != nil {
-			forwarded <- err
-			return
-		}
-
-		if _, err := io.Copy(upstream, bytes.NewReader(fragmented)); err != nil {
-			forwarded <- err
-			return
-		}
-
-		forwarded <- nil
-
-		// Forward subsequent TLS traffic in both directions.
-		go io.Copy(proxySide, upstream)
-		io.Copy(upstream, proxySide)
-	}()
-
-	if err := client.Handshake(); err != nil {
-		t.Fatalf("fragmented TLS handshake failed: %v", err)
+	if name != hostname {
+		t.Fatalf("unexpected SNI: got %q, want %q", name, hostname)
 	}
 
-	if err := <-forwarded; err != nil {
-		t.Fatalf("forward fragmented ClientHello: %v", err)
+	splitAt := offset - 5 + len(name)/2
+
+	fragmented, err := SplitClientHelloRecord(original, splitAt)
+	if err != nil {
+		t.Fatalf("split updater-shaped ClientHello: %v", err)
 	}
 
-	if client.ConnectionState().ServerName != hostname {
-		t.Fatalf("unexpected TLS server name: %s", client.ConnectionState().ServerName)
+	firstLength := int(binary.BigEndian.Uint16(fragmented[3:5]))
+	secondStart := 5 + firstLength
+
+	if secondStart+5 > len(fragmented) {
+		t.Fatal("second TLS record header is missing")
 	}
 
-	if len(client.ConnectionState().VerifiedChains) == 0 {
-		t.Fatal("TLS certificate chain was not verified")
+	secondLength := int(binary.BigEndian.Uint16(
+		fragmented[secondStart+3 : secondStart+5],
+	))
+
+	if secondStart+5+secondLength != len(fragmented) {
+		t.Fatal("invalid second TLS record length")
 	}
 
-	t.Logf("fragmented ClientHello accepted by TLS server")
-	t.Logf("negotiated TLS version: 0x%04x", client.ConnectionState().Version)
+	if fragmented[0] != 0x16 || fragmented[secondStart] != 0x16 {
+		t.Fatal("expected two TLS handshake records")
+	}
+
+	if fragmented[2] != 0x01 || fragmented[secondStart+2] != 0x01 {
+		t.Fatal("TLS record version was not preserved")
+	}
+
+	reconstructed := append(
+		[]byte{},
+		fragmented[5:secondStart]...,
+	)
+	reconstructed = append(
+		reconstructed,
+		fragmented[secondStart+5:]...,
+	)
+
+	if !bytes.Equal(reconstructed, original[5:]) {
+		t.Fatal("fragmentation modified the ClientHello payload")
+	}
+
+	t.Logf("ClientHello size: %d bytes", len(original))
+	t.Logf("SNI: %s", name)
+	t.Logf("Split position: %d", splitAt)
+	t.Logf("First record payload: %d bytes", firstLength)
+	t.Logf("Second record payload: %d bytes", secondLength)
+}
+
+func TestSplitClientHelloRecordAtDifferentPositions(t *testing.T) {
+	original := makeTestClientHello("updates.discord.com")
+
+	// Add an empty padding extension so the SNI is no longer the final field in the ClientHello.
+	paddingExtension := []byte{
+		0x00, 0x15, // Extension type: padding (21).
+		0x00, 0x00, // Extension length: 0.
+	}
+
+	original = append(original, paddingExtension...)
+
+	// The existing synthetic ClientHello contains one extensions vector.
+	// Its two-byte length is immediately before the server_name extension.
+	extensionsLengthOffset := len(original) - len(paddingExtension) - (4 + 2 + 3 + len("updates.discord.com")) - 2
+
+	extensionsLength := binary.BigEndian.Uint16(
+		original[extensionsLengthOffset : extensionsLengthOffset+2],
+	)
+
+	binary.BigEndian.PutUint16(
+		original[extensionsLengthOffset:extensionsLengthOffset+2],
+		extensionsLength+uint16(len(paddingExtension)),
+	)
+
+	// Update the outer TLS record length.
+	binary.BigEndian.PutUint16(
+		original[3:5],
+		uint16(len(original)-recordHeaderSize),
+	)
+
+	// Update the three-byte handshake length.
+	handshakeLength := len(original) - recordHeaderSize - 4
+
+	original[6] = byte(handshakeLength >> 16)
+	original[7] = byte(handshakeLength >> 8)
+	original[8] = byte(handshakeLength)
+
+	hostname, offset, err := FindServerName(original)
+	if err != nil {
+		t.Fatalf("find server name: %v", err)
+	}
+
+	sniStart := offset - recordHeaderSize
+	sniEnd := sniStart + len(hostname)
+	payloadLength := len(original) - recordHeaderSize
+
+	tests := []struct {
+		name    string
+		splitAt int
+	}{
+		{
+			name:    "after handshake header",
+			splitAt: 4,
+		},
+		{
+			name:    "before SNI",
+			splitAt: sniStart,
+		},
+		{
+			name:    "middle of SNI",
+			splitAt: sniStart + len(hostname)/2,
+		},
+		{
+			name:    "after SNI",
+			splitAt: sniEnd,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fragmented, err := SplitClientHelloRecord(original, tt.splitAt)
+			if err != nil {
+				t.Fatalf("split ClientHello: %v", err)
+			}
+
+			if len(fragmented) != len(original)+recordHeaderSize {
+				t.Fatalf("unexpected fragmented size: %d", len(fragmented))
+			}
+
+			firstLength := int(binary.BigEndian.Uint16(fragmented[3:5]))
+			secondStart := recordHeaderSize + firstLength
+
+			if firstLength != tt.splitAt {
+				t.Fatalf("first record length: got %d, want %d",
+					firstLength, tt.splitAt)
+			}
+
+			if secondStart+recordHeaderSize > len(fragmented) {
+				t.Fatal("second TLS record header is missing")
+			}
+
+			secondLength := int(binary.BigEndian.Uint16(
+				fragmented[secondStart+3 : secondStart+5],
+			))
+
+			if secondLength != payloadLength-tt.splitAt {
+				t.Fatalf("unexpected second record length: %d",
+					secondLength)
+			}
+
+			if fragmented[0] != 0x16 || fragmented[secondStart] != 0x16 {
+				t.Fatal("expected two TLS handshake records")
+			}
+
+			if !bytes.Equal(fragmented[:3], original[:3]) ||
+				!bytes.Equal(fragmented[secondStart:secondStart+3], original[:3]) {
+				t.Fatal("TLS record type or version was modified")
+			}
+
+			reconstructed := make([]byte, 0, payloadLength)
+			reconstructed = append(
+				reconstructed,
+				fragmented[recordHeaderSize:secondStart]...,
+			)
+			reconstructed = append(
+				reconstructed,
+				fragmented[secondStart+recordHeaderSize:]...,
+			)
+
+			if !bytes.Equal(reconstructed, original[recordHeaderSize:]) {
+				t.Fatal("fragmentation modified the ClientHello payload")
+			}
+		})
+	}
+}
+
+func TestForwardInitialRecordWithStrategy(t *testing.T) {
+	original := makeTestClientHello("updates.discord.com")
+
+	hostname, offset, err := FindServerName(original)
+	if err != nil {
+		t.Fatalf("find server name: %v", err)
+	}
+
+	sniStart := offset - recordHeaderSize
+
+	tests := []struct {
+		name     string
+		strategy Strategy
+		splitAt  int
+	}{
+		{
+			name:     "SNI midpoint",
+			strategy: StrategySNIMidpoint,
+			splitAt:  sniStart + len(hostname)/2,
+		},
+		{
+			name:     "before SNI",
+			strategy: StrategyBeforeSNI,
+			splitAt:  sniStart,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var output bytes.Buffer
+
+			err := ForwardInitialRecordWithStrategy(
+				&output,
+				bytes.NewReader(original),
+				tt.strategy,
+			)
+			if err != nil {
+				t.Fatalf("forward initial TLS record: %v", err)
+			}
+
+			fragmented := output.Bytes()
+
+			if len(fragmented) != len(original)+recordHeaderSize {
+				t.Fatalf(
+					"unexpected output length: got %d, want %d",
+					len(fragmented),
+					len(original)+recordHeaderSize,
+				)
+			}
+
+			firstLength := int(binary.BigEndian.Uint16(
+				fragmented[3:5],
+			))
+
+			if firstLength != tt.splitAt {
+				t.Fatalf(
+					"unexpected split position: got %d, want %d",
+					firstLength,
+					tt.splitAt,
+				)
+			}
+
+			secondStart := recordHeaderSize + firstLength
+
+			if secondStart+recordHeaderSize > len(fragmented) {
+				t.Fatal("second TLS record header is missing")
+			}
+
+			secondLength := int(binary.BigEndian.Uint16(
+				fragmented[secondStart+3 : secondStart+5],
+			))
+
+			if secondStart+recordHeaderSize+secondLength != len(fragmented) {
+				t.Fatal("invalid second TLS record length")
+			}
+
+			if fragmented[0] != 0x16 || fragmented[secondStart] != 0x16 {
+				t.Fatal("expected two TLS handshake records")
+			}
+
+			reconstructed := make([]byte, 0, len(original)-recordHeaderSize)
+			reconstructed = append(
+				reconstructed,
+				fragmented[recordHeaderSize:secondStart]...,
+			)
+			reconstructed = append(
+				reconstructed,
+				fragmented[secondStart+recordHeaderSize:]...,
+			)
+
+			if !bytes.Equal(reconstructed, original[recordHeaderSize:]) {
+				t.Fatal("fragmentation changed the ClientHello payload")
+			}
+		})
+	}
+}
+
+func TestForwardInitialRecordRejectsUnknownStrategy(t *testing.T) {
+	var output bytes.Buffer
+
+	err := ForwardInitialRecordWithStrategy(
+		&output,
+		bytes.NewReader(makeTestClientHello("example.com")),
+		Strategy("unknown"),
+	)
+
+	if err == nil {
+		t.Fatal("expected unsupported strategy error")
+	}
+
+	if !strings.Contains(err.Error(), "unsupported TLS fragmentation strategy") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if output.Len() != 0 {
+		t.Fatal("unexpected output for unsupported strategy")
+	}
+}
+
+func TestForwardInitialRecordPreservesDefaultStrategy(t *testing.T) {
+	original := makeTestClientHello("updates.discord.com")
+
+	var defaultOutput bytes.Buffer
+	var explicitOutput bytes.Buffer
+
+	if err := ForwardInitialRecord(
+		&defaultOutput,
+		bytes.NewReader(original),
+	); err != nil {
+		t.Fatalf("forward with default strategy: %v", err)
+	}
+
+	if err := ForwardInitialRecordWithStrategy(
+		&explicitOutput,
+		bytes.NewReader(original),
+		StrategySNIMidpoint,
+	); err != nil {
+		t.Fatalf("forward with explicit default strategy: %v", err)
+	}
+
+	if !bytes.Equal(defaultOutput.Bytes(), explicitOutput.Bytes()) {
+		t.Fatal("default fragmentation behavior changed")
+	}
 }

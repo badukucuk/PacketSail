@@ -11,6 +11,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/badukucuk/PacketSail/internal/tlsfrag"
 )
 
 // testLookupIPv4 resolves localhost without depending on external DNS.
@@ -39,7 +41,7 @@ func TestUnsupportedAuthMethod(t *testing.T) {
 			return
 		}
 
-		handleConnection(conn, testLookupIPv4, false)
+		handleConnection(conn, testLookupIPv4, false, tlsfrag.StrategySNIMidpoint)
 	}()
 
 	client, err := net.Dial("tcp4", listener.Addr().String())
@@ -100,7 +102,7 @@ func TestConnectAndRelay(t *testing.T) {
 			return
 		}
 
-		handleConnection(conn, testLookupIPv4, false)
+		handleConnection(conn, testLookupIPv4, false, tlsfrag.StrategySNIMidpoint)
 	}()
 
 	client, err := net.Dial("tcp4", proxyListener.Addr().String())
@@ -198,7 +200,7 @@ func TestConnectFailure(t *testing.T) {
 			return
 		}
 
-		handleConnection(conn, testLookupIPv4, false)
+		handleConnection(conn, testLookupIPv4, false, tlsfrag.StrategySNIMidpoint)
 	}()
 
 	client, err := net.Dial("tcp4", proxyListener.Addr().String())
@@ -274,7 +276,7 @@ func TestConnectWithDomain(t *testing.T) {
 			return
 		}
 
-		handleConnection(conn, testLookupIPv4, false)
+		handleConnection(conn, testLookupIPv4, false, tlsfrag.StrategySNIMidpoint)
 	}()
 
 	client, err := net.Dial("tcp4", proxyListener.Addr().String())
@@ -354,7 +356,7 @@ func TestEmptyDomain(t *testing.T) {
 			return
 		}
 
-		handleConnection(conn, testLookupIPv4, false)
+		handleConnection(conn, testLookupIPv4, false, tlsfrag.StrategySNIMidpoint)
 	}()
 
 	client, err := net.Dial("tcp4", listener.Addr().String())
@@ -442,7 +444,7 @@ func TestConnectWithDomainFallback(t *testing.T) {
 			return
 		}
 
-		handleConnection(conn, lookup, false)
+		handleConnection(conn, lookup, false, tlsfrag.StrategySNIMidpoint)
 	}()
 
 	client, err := net.Dial("tcp4", proxyListener.Addr().String())
@@ -505,7 +507,9 @@ func TestConnectWithDomainFallback(t *testing.T) {
 	}
 }
 
-func TestForwardClientTrafficFragmentsTLS(t *testing.T) {
+func testForwardClientTrafficFragmentsTLS(t *testing.T, strategy tlsfrag.Strategy) {
+	t.Helper()
+
 	// Construct a minimal ClientHello containing example.com as SNI.
 	hostname := []byte("example.com")
 
@@ -561,7 +565,7 @@ func TestForwardClientTrafficFragmentsTLS(t *testing.T) {
 	forwardDone := make(chan error, 1)
 
 	go func() {
-		forwardDone <- forwardClientTraffic(proxy, server, 443)
+		forwardDone <- forwardClientTrafficWithStrategy(proxy, server, 443, initialTLSReadTimeout, strategy)
 	}()
 
 	writeDone := make(chan error, 1)
@@ -643,23 +647,62 @@ func TestForwardClientTrafficFragmentsTLS(t *testing.T) {
 		t.Fatal("fragmentation changed the ClientHello payload")
 	}
 
-	// Verify that the record boundary is inside the SNI hostname.
+	// Verify that the selected strategy produced the expected boundary.
 	hostnameStart := bytes.Index(original, hostname)
 	if hostnameStart < 0 {
 		t.Fatal("original ClientHello has no hostname")
 	}
 
-	boundary := 5 + len(first) - 5
+	boundary := len(first)
 
-	if boundary <= hostnameStart ||
-		boundary >= hostnameStart+len(hostname) {
-		t.Fatalf("TLS split boundary %d is outside SNI", boundary)
+	var expectedBoundary int
+
+	switch strategy {
+	case tlsfrag.StrategySNIMidpoint:
+		expectedBoundary = hostnameStart + len(hostname)/2
+
+	case tlsfrag.StrategyBeforeSNI:
+		expectedBoundary = hostnameStart
+
+	default:
+		t.Fatalf("unexpected test strategy: %s", strategy)
+	}
+
+	if boundary != expectedBoundary {
+		t.Fatalf(
+			"unexpected split boundary for %s: got %d, want %d",
+			strategy,
+			boundary,
+			expectedBoundary,
+		)
 	}
 
 	t.Logf("original record: %d bytes", len(original))
 	t.Logf("first record: %d bytes", len(first))
 	t.Logf("second record: %d bytes", len(second))
 	t.Logf("TLS split boundary: %d", boundary)
+}
+
+func TestForwardClientTrafficFragmentsTLS(t *testing.T) {
+	tests := []struct {
+		name     string
+		strategy tlsfrag.Strategy
+	}{
+		{
+			name:     "SNI midpoint",
+			strategy: tlsfrag.StrategySNIMidpoint,
+		},
+		{
+			name:     "before SNI",
+			strategy: tlsfrag.StrategyBeforeSNI,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testForwardClientTrafficFragmentsTLS(t, tt.strategy)
+		})
+	}
 }
 
 func TestForwardClientTrafficPreservesNonTLS(t *testing.T) {

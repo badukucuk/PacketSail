@@ -28,9 +28,14 @@ Domain names are resolved using DNS-over-HTTPS (DoH) through Google Public DNS. 
 
 When multiple IPv4 addresses are returned, PacketSail attempts TCP connections sequentially until one succeeds or all attempts fail.
 
-PacketSail also supports **experimental TLS ClientHello record fragmentation**, which can be enabled using the `--fragment` flag. When enabled, the proxy attempts to split the initial ClientHello into two TLS handshake records at a position inside the SNI hostname for connections targeting port 443.
+PacketSail also supports **experimental TLS ClientHello record fragmentation**, which can be enabled using the `--fragment` flag. For connections targeting port 443, the proxy examines the initial ClientHello and attempts to split it into two TLS handshake records without modifying the original handshake payload.
 
-TLS fragmentation is disabled by default. Unsupported ClientHello formats are forwarded without modification when possible.
+Two fragmentation strategies are supported:
+
+- `sni-midpoint` (default): Splits the ClientHello inside the SNI hostname.
+- `before-sni`: Splits the ClientHello immediately before the SNI hostname.
+
+The strategy can be selected using `--fragment-strategy`. TLS fragmentation is disabled by default. Unsupported ClientHello formats are forwarded without modification when possible.
 
 Local tests have verified successful TLS 1.3 handshakes with fragmented ClientHello records, and manual HTTPS connectivity tests have succeeded in both proxy modes.
 
@@ -65,9 +70,21 @@ The following results were obtained on macOS using PacketSail with `--proxy --fr
 
 The Discord desktop updater has been observed using HTTP CONNECT to access `updates.discord.com`.
 
-PacketSail now supports HTTP CONNECT on `127.0.0.1:9877`. Manual tests confirmed that this proxy can establish an HTTPS tunnel to the Discord update server, complete a TLS 1.3 handshake, and receive an HTTP response.
+PacketSail supports HTTP CONNECT on `127.0.0.1:9877`. Manual tests confirmed that this proxy can establish an HTTPS tunnel to the Discord update server, complete a TLS 1.3 handshake, and receive an HTTP response.
 
-However, the Discord updater still encounters TLS connection failures, both with fragmentation enabled and disabled. The cause remains under investigation. Successful desktop application operation has not yet been verified.
+However, the Discord updater still encounters TLS connection failures in the tested environment.
+
+Network diagnostics confirmed that the updater's ClientHello was fragmented and that the remote endpoint responded with a TLS ServerHello before the TCP connection was reset.
+
+Similar updater failures were observed on both Wi-Fi and a mobile hotspot. Direct TLS connections to the tested destination also encountered connection resets.
+
+Successful Discord desktop application operation remains unverified.
+
+The `before-sni` fragmentation strategy has also been tested against the Discord desktop updater. Both `sni-midpoint` and `before-sni` continue to produce TLS connection failures in the tested environment.
+
+Manual HTTPS tests successfully complete TLS 1.3 handshakes with both strategies. TLS 1.2 connections, however, fail after receiving a ServerHello.
+
+The underlying cause remains unresolved. Additional fragmentation strategies will be considered after further protocol compatibility testing.
 
 ### Performance Testing
 
@@ -171,21 +188,96 @@ Successful HTTPS connectivity through the HTTP CONNECT proxy has been verified. 
 
 ### Experimental TLS Fragmentation
 
-Enable TLS ClientHello record fragmentation:
+PacketSail supports experimental TLS ClientHello record fragmentation for connections targeting port 443.
+
+When fragmentation is enabled, PacketSail examines the initial TLS handshake record and attempts to split supported ClientHello messages into two TLS handshake records. The original handshake payload is preserved.
+
+Fragmentation is disabled by default.
+
+#### Fragmentation Strategies
+
+Two strategies are available:
+
+| Strategy | Description |
+|---|---|
+| `sni-midpoint` | Splits the ClientHello in the middle of the SNI hostname. This is the default strategy. |
+| `before-sni` | Splits the ClientHello immediately before the SNI hostname. |
+
+**Default strategy**
+
+Enable TLS fragmentation with the default `sni-midpoint` strategy:
 
 ```bash
 ./bin/packetsail --proxy --fragment
 ```
 
-When enabled, PacketSail examines the initial TLS handshake record for connections targeting port 443. For supported ClientHello messages containing an SNI hostname, the proxy splits the handshake payload into two TLS records while preserving the original handshake bytes.
+This is equivalent to:
 
-The feature is experimental and may not work with all TLS implementations, network conditions, or ClientHello formats.
+```bash
+./bin/packetsail --proxy --fragment \
+  --fragment-strategy=sni-midpoint
+```
 
-TLS fragmentation is disabled by default. Omit `--fragment` to run either proxy without TLS record modification.
+**Before-SNI strategy**
+
+Select the alternative strategy:
+
+```bash
+./bin/packetsail --proxy --fragment \
+  --fragment-strategy=before-sni
+```
+
+**HTTP CONNECT proxy**
+
+Enable the alternative strategy for HTTP CONNECT:
+
+```bash
+./bin/packetsail --http-proxy --fragment \
+  --fragment-strategy=before-sni
+```
+
+**Both proxies**
+
+Run SOCKS5 and HTTP CONNECT simultaneously with the same strategy:
+
+```bash
+./bin/packetsail --proxy --http-proxy \
+  --fragment --fragment-strategy=before-sni
+```
+
+The `--fragment-strategy` option requires `--fragment`. Unsupported strategy names are rejected.
+
+Omitting `--fragment-strategy` preserves the existing `sni-midpoint` behavior.
+
+#### Validation
+
+Local tests have verified that both strategies preserve the original ClientHello handshake payload.
+
+Local TLS 1.2 and TLS 1.3 handshake tests have also succeeded with multiple fragmentation positions.
+
+These tests validate local TLS compatibility but do not guarantee successful DPI circumvention or compatibility with every TLS implementation.
+
+Discord web connectivity has been verified using the default `sni-midpoint` strategy.
+
+Both fragmentation strategies have been tested against the Discord desktop updater in a restricted network. Neither has resolved the updater's TLS connection failures.
+
+#### Limitations
+
+PacketSail currently supports IPv4 TCP connections only.
+
+The DNS resolver uses a single DNS-over-HTTPS provider with a fixed bootstrap IPv4 address.
+
+The SOCKS5 proxy does not support authentication, UDP relay, or IPv6 destinations.
+
+The HTTP CONNECT proxy supports only destinations on port 443 and does not implement general HTTP forwarding or proxy authentication.
+
+TLS fragmentation is experimental and supports only certain ClientHello layouts. Unsupported records are forwarded unchanged when possible.
+
+DPI circumvention and Discord desktop application compatibility are not guaranteed.
+
+PacketSail is intended for local experimental use.
 
 Stop the proxy using `Ctrl+C`.
-
-**Limitations:** PacketSail currently supports IPv4 TCP connections only. The DNS resolver uses a single DNS-over-HTTPS provider with a fixed bootstrap IPv4 address. The SOCKS5 proxy does not support authentication, UDP relay, or IPv6 destinations. The HTTP CONNECT proxy supports only destinations on port 443 and does not implement general HTTP forwarding or proxy authentication. TLS fragmentation is experimental and supports only certain ClientHello layouts. DPI circumvention and desktop application compatibility are not guaranteed. PacketSail is intended for local experimental use.
 
 ## License
 

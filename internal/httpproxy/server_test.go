@@ -29,6 +29,7 @@ func TestConnectRejectsUnsupportedPort(t *testing.T) {
 			return nil, nil
 		},
 		true,
+		tlsfrag.StrategySNIMidpoint,
 	))
 	defer proxy.Close()
 
@@ -97,7 +98,7 @@ func TestConnectAndRelay(t *testing.T) {
 		return dialer.DialContext(ctx, "tcp4", target.Addr().String())
 	}
 
-	proxy := httptest.NewServer(newHandler(lookup, dial, true))
+	proxy := httptest.NewServer(newHandler(lookup, dial, true, tlsfrag.StrategySNIMidpoint))
 	defer proxy.Close()
 
 	client, err := net.Dial("tcp4", proxy.Listener.Addr().String())
@@ -174,6 +175,7 @@ func TestConnectDNSFailure(t *testing.T) {
 			return nil, fmt.Errorf("unexpected dial")
 		},
 		true,
+		tlsfrag.StrategySNIMidpoint,
 	))
 	defer proxy.Close()
 
@@ -211,6 +213,7 @@ func TestConnectTCPFailure(t *testing.T) {
 			return nil, fmt.Errorf("connection refused")
 		},
 		true,
+		tlsfrag.StrategySNIMidpoint,
 	))
 	defer proxy.Close()
 
@@ -282,7 +285,7 @@ func TestConnectPreservesBufferedData(t *testing.T) {
 		return dialer.DialContext(ctx, "tcp4", target.Addr().String())
 	}
 
-	proxy := httptest.NewServer(newHandler(lookup, dial, true))
+	proxy := httptest.NewServer(newHandler(lookup, dial, true, tlsfrag.StrategySNIMidpoint))
 	defer proxy.Close()
 
 	client, err := net.Dial("tcp4", proxy.Listener.Addr().String())
@@ -389,11 +392,13 @@ func makeRealClientHello(t *testing.T) []byte {
 	return record
 }
 
-func TestConnectFragmentsRealClientHello(t *testing.T) {
+func testConnectFragmentsRealClientHello(t *testing.T, strategy tlsfrag.Strategy) {
+	t.Helper()
+
 	original := makeRealClientHello(t)
 
 	// Ensure the test actually contains a parsable SNI.
-	hostname, _, err := tlsfrag.FindServerName(original)
+	hostname, offset, err := tlsfrag.FindServerName(original)
 	if err != nil {
 		t.Fatalf("find ClientHello SNI: %v", err)
 	}
@@ -402,13 +407,24 @@ func TestConnectFragmentsRealClientHello(t *testing.T) {
 		t.Fatalf("unexpected SNI: %q", hostname)
 	}
 
+	expectedSplit := offset - 5
+
+	if strategy == tlsfrag.StrategySNIMidpoint {
+		expectedSplit += len(hostname) / 2
+	}
+
 	target, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("start target listener: %v", err)
 	}
 	defer target.Close()
 
-	received := make(chan []byte, 1)
+	type receivedHello struct {
+		payload     []byte
+		firstLength int
+	}
+
+	received := make(chan receivedHello, 1)
 	targetErrors := make(chan error, 1)
 
 	go func() {
@@ -426,6 +442,7 @@ func TestConnectFragmentsRealClientHello(t *testing.T) {
 
 		// Read the two TLS records produced by PacketSail.
 		var combined []byte
+		var firstLength int
 
 		for i := 0; i < 2; i++ {
 			var header [5]byte
@@ -442,6 +459,10 @@ func TestConnectFragmentsRealClientHello(t *testing.T) {
 
 			length := int(binary.BigEndian.Uint16(header[3:5]))
 
+			if i == 0 {
+				firstLength = length
+			}
+
 			payload := make([]byte, length)
 			if _, err := io.ReadFull(conn, payload); err != nil {
 				targetErrors <- fmt.Errorf("read record %d payload: %w", i+1, err)
@@ -451,7 +472,10 @@ func TestConnectFragmentsRealClientHello(t *testing.T) {
 			combined = append(combined, payload...)
 		}
 
-		received <- combined
+		received <- receivedHello{
+			payload:     combined,
+			firstLength: firstLength,
+		}
 	}()
 
 	lookup := func(ctx context.Context, host string) ([]net.IP, error) {
@@ -471,7 +495,7 @@ func TestConnectFragmentsRealClientHello(t *testing.T) {
 		return dialer.DialContext(ctx, "tcp4", target.Addr().String())
 	}
 
-	proxy := httptest.NewServer(newHandler(lookup, dial, true))
+	proxy := httptest.NewServer(newHandler(lookup, dial, true, strategy))
 	defer proxy.Close()
 
 	client, err := net.Dial("tcp4", proxy.Listener.Addr().String())
@@ -507,10 +531,19 @@ func TestConnectFragmentsRealClientHello(t *testing.T) {
 	}
 
 	select {
-	case payload := <-received:
+	case result := <-received:
 		// TLS record headers change, but handshake payload must remain intact.
-		if !bytes.Equal(payload, original[5:]) {
+		if !bytes.Equal(result.payload, original[5:]) {
 			t.Fatal("fragmentation modified the ClientHello payload")
+		}
+
+		if result.firstLength != expectedSplit {
+			t.Fatalf(
+				"unexpected split position for %s: got %d, want %d",
+				strategy,
+				result.firstLength,
+				expectedSplit,
+			)
 		}
 
 	case err := <-targetErrors:
@@ -518,5 +551,27 @@ func TestConnectFragmentsRealClientHello(t *testing.T) {
 
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for fragmented ClientHello")
+	}
+}
+
+func TestConnectFragmentsRealClientHello(t *testing.T) {
+	tests := []struct {
+		name     string
+		strategy tlsfrag.Strategy
+	}{
+		{
+			name:     "SNI midpoint",
+			strategy: tlsfrag.StrategySNIMidpoint,
+		},
+		{
+			name:     "before SNI",
+			strategy: tlsfrag.StrategyBeforeSNI,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testConnectFragmentsRealClientHello(t, tt.strategy)
+		})
 	}
 }

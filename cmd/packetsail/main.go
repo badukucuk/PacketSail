@@ -7,6 +7,7 @@ import (
 
 	"github.com/badukucuk/PacketSail/internal/httpproxy"
 	"github.com/badukucuk/PacketSail/internal/socks5"
+	"github.com/badukucuk/PacketSail/internal/tlsfrag"
 )
 
 func main() {
@@ -14,6 +15,12 @@ func main() {
 	proxy := flag.Bool("proxy", false, "Start the local SOCKS5 proxy")
 	httpProxy := flag.Bool("http-proxy", false, "Start the local HTTP CONNECT proxy")
 	fragment := flag.Bool("fragment", false, "Enable experimental TLS ClientHello fragmentation")
+
+	fragmentStrategy := flag.String(
+		"fragment-strategy",
+		string(tlsfrag.StrategySNIMidpoint),
+		"TLS fragmentation strategy: sni-midpoint or before-sni",
+	)
 
 	flag.Parse()
 
@@ -25,6 +32,40 @@ func main() {
 
 	if *fragment && !*proxy && !*httpProxy {
 		fmt.Fprintln(os.Stderr, "Error: --fragment requires --proxy or --http-proxy")
+		os.Exit(2)
+	}
+
+	strategy := tlsfrag.Strategy(*fragmentStrategy)
+
+	switch strategy {
+	case tlsfrag.StrategySNIMidpoint, tlsfrag.StrategyBeforeSNI:
+		// Both strategies are supported
+	default:
+		fmt.Fprintf(
+			os.Stderr,
+			"Error: unsupported fragmentation strategy: %q\n",
+			*fragmentStrategy,
+		)
+		fmt.Fprintln(
+			os.Stderr,
+			"Supported strategies: sni-midpoint, before-sni",
+		)
+		os.Exit(2)
+	}
+
+	strategySpecified := false
+
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "fragment-strategy" {
+			strategySpecified = true
+		}
+	})
+
+	if strategySpecified && !*fragment {
+		fmt.Fprintln(
+			os.Stderr,
+			"Error: --fragment-strategy requires --fragment",
+		)
 		os.Exit(2)
 	}
 
@@ -44,13 +85,21 @@ func main() {
 
 	if *proxy {
 		go func() {
-			errors <- socks5.ListenAndServe("127.0.0.1:9876", *fragment)
+			errors <- socks5.ListenAndServe(
+				"127.0.0.1:9876",
+				*fragment,
+				strategy,
+			)
 		}()
 	}
 
 	if *httpProxy {
 		go func() {
-			errors <- httpproxy.ListenAndServe("127.0.0.1:9877", *fragment)
+			errors <- httpproxy.ListenAndServe(
+				"127.0.0.1:9877",
+				*fragment,
+				strategy,
+			)
 		}()
 	}
 

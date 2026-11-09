@@ -3,12 +3,39 @@ package tlsfrag
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
 )
 
-// ForwardInitialRecord processes and forwards the first TLS record.
-// Non-TLS traffic is passed through without modification.
+// Strategy identifies where the initial ClientHello is split.
+type Strategy string
+
+const (
+	StrategySNIMidpoint Strategy = "sni-midpoint"
+	StrategyBeforeSNI   Strategy = "before-sni"
+)
+
+// ForwardInitialRecord preserves the existing default behavior.
 func ForwardInitialRecord(dst io.Writer, src io.Reader) error {
+	return ForwardInitialRecordWithStrategy(
+		dst,
+		src,
+		StrategySNIMidpoint,
+	)
+}
+
+// ForwardInitialRecordWithStrategy processes the first TLS record using the selected fragmentation strategy.
+func ForwardInitialRecordWithStrategy(
+	dst io.Writer,
+	src io.Reader,
+	strategy Strategy,
+) error {
+	switch strategy {
+	case StrategySNIMidpoint, StrategyBeforeSNI:
+	default:
+		return fmt.Errorf("unsupported TLS fragmentation strategy: %q", strategy)
+	}
+
 	var first [1]byte
 
 	if _, err := io.ReadFull(src, first[:]); err != nil {
@@ -51,7 +78,18 @@ func ForwardInitialRecord(dst io.Writer, src io.Reader) error {
 
 	hostname, offset, err := FindServerName(record)
 	if err == nil {
-		splitAt := offset - recordHeaderSize + len(hostname)/2
+		// FindServerName returns an offset relative to the complete
+		// TLS record. SplitClientHelloRecord expects a payload offset.
+		sniStart := offset - recordHeaderSize
+
+		var splitAt int
+
+		switch strategy {
+		case StrategySNIMidpoint:
+			splitAt = sniStart + len(hostname)/2
+		case StrategyBeforeSNI:
+			splitAt = sniStart
+		}
 
 		fragmented, splitErr := SplitClientHelloRecord(record, splitAt)
 		if splitErr == nil {
@@ -63,8 +101,7 @@ func ForwardInitialRecord(dst io.Writer, src io.Reader) error {
 	return err
 }
 
-// ForwardClientHello processes the first record and then forwards
-// all remaining data unchanged.
+// ForwardClientHello processes the first record and then forwards all remaining data unchanged.
 func ForwardClientHello(dst io.Writer, src io.Reader) error {
 	if err := ForwardInitialRecord(dst, src); err != nil {
 		return err

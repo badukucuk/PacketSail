@@ -15,7 +15,7 @@ import (
 )
 
 // ListenAndServe starts a local SOCKS5 server and accepts TCP connections.
-func ListenAndServe(address string, fragment bool) error {
+func ListenAndServe(address string, fragment bool, strategy tlsfrag.Strategy) error {
 	listener, err := net.Listen("tcp4", address)
 	if err != nil {
 		return fmt.Errorf("start SOCKS5 listener: %w", err)
@@ -31,12 +31,17 @@ func ListenAndServe(address string, fragment bool) error {
 			return fmt.Errorf("accept SOCKS5 connection: %w", err)
 		}
 
-		go handleConnection(conn, resolver.LookupIPv4, fragment)
+		go handleConnection(conn, resolver.LookupIPv4, fragment, strategy)
 	}
 }
 
 // handleConnection processes one SOCKS5 client connection.
-func handleConnection(client net.Conn, lookupIPv4 func(context.Context, string) ([]net.IP, error), fragment bool) {
+func handleConnection(
+	client net.Conn,
+	lookupIPv4 func(context.Context, string) ([]net.IP, error),
+	fragment bool,
+	strategy tlsfrag.Strategy,
+) {
 	defer client.Close()
 
 	// Limit how long a client can leave protocol negotiation unfinished.
@@ -214,7 +219,7 @@ func handleConnection(client net.Conn, lookupIPv4 func(context.Context, string) 
 		var err error
 
 		if fragment {
-			err = forwardClientTraffic(client, server, port)
+			err = forwardClientTrafficWithStrategy(client, server, port, initialTLSReadTimeout, strategy)
 		} else {
 			_, err = io.Copy(server, client)
 		}
@@ -258,25 +263,42 @@ func handleConnection(client net.Conn, lookupIPv4 func(context.Context, string) 
 
 const initialTLSReadTimeout = 10 * time.Second
 
-// forwardClientTraffic forwards client data using the default TLS read timeout.
+// forwardClientTraffic preserves the default fragmentation behavior.
 func forwardClientTraffic(client net.Conn, server net.Conn, port uint16) error {
-	return forwardClientTrafficWithTimeout(
+	return forwardClientTrafficWithStrategy(
 		client,
 		server,
 		port,
 		initialTLSReadTimeout,
+		tlsfrag.StrategySNIMidpoint,
 	)
 }
 
-// forwardClientTrafficWithTimeout forwards client data to the destination.
-// On port 443, it attempts to fragment the initial ClientHello record using the specified read timeout before forwarding the remaining data.
+// forwardClientTrafficWithTimeout allows tests to control the initial TLS read deadline while preserving the default strategy.
 func forwardClientTrafficWithTimeout(client net.Conn, server net.Conn, port uint16, timeout time.Duration) error {
+	return forwardClientTrafficWithStrategy(
+		client,
+		server,
+		port,
+		timeout,
+		tlsfrag.StrategySNIMidpoint,
+	)
+}
+
+// forwardClientTrafficWithStrategy forwards the initial TLS record using the selected strategy, then relays remaining bytes unchanged.
+func forwardClientTrafficWithStrategy(
+	client net.Conn,
+	server net.Conn,
+	port uint16,
+	timeout time.Duration,
+	strategy tlsfrag.Strategy,
+) error {
 	if port == 443 {
 		if err := client.SetReadDeadline(time.Now().Add(timeout)); err != nil {
 			return fmt.Errorf("set initial TLS read deadline: %w", err)
 		}
 
-		forwardErr := tlsfrag.ForwardInitialRecord(server, client)
+		forwardErr := tlsfrag.ForwardInitialRecordWithStrategy(server, client, strategy)
 
 		// Clear the temporary deadline before normal TCP forwarding.
 		clearErr := client.SetReadDeadline(time.Time{})

@@ -26,16 +26,17 @@ type handler struct {
 	lookup   lookupFunc
 	dial     dialFunc
 	fragment bool
+	strategy tlsfrag.Strategy
 }
 
 // ListenAndServe starts the local HTTP CONNECT proxy.
-func ListenAndServe(address string, fragment bool) error {
+func ListenAndServe(address string, fragment bool, strategy tlsfrag.Strategy) error {
 	resolver := dns.NewResolver()
 	dialer := &net.Dialer{Timeout: connectTimeout}
 
 	server := &http.Server{
 		Addr:              address,
-		Handler:           newHandler(resolver.LookupIPv4, dialer.DialContext, fragment),
+		Handler:           newHandler(resolver.LookupIPv4, dialer.DialContext, fragment, strategy),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -49,11 +50,12 @@ func ListenAndServe(address string, fragment bool) error {
 }
 
 // newHandler creates a CONNECT handler with injectable network operations.
-func newHandler(lookup lookupFunc, dial dialFunc, fragment bool) http.Handler {
+func newHandler(lookup lookupFunc, dial dialFunc, fragment bool, strategy tlsfrag.Strategy) http.Handler {
 	return &handler{
 		lookup:   lookup,
 		dial:     dial,
 		fragment: fragment,
+		strategy: strategy,
 	}
 }
 
@@ -153,7 +155,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if err := client.SetReadDeadline(time.Now().Add(initialTLSTimeout)); err != nil {
 				forwardErr = err
 			} else {
-				forwardErr = tlsfrag.ForwardInitialRecord(upstream, buffered.Reader)
+				forwardErr = tlsfrag.ForwardInitialRecordWithStrategy(upstream, buffered.Reader, h.strategy)
 				clearErr := client.SetReadDeadline(time.Time{})
 
 				if forwardErr == nil {
