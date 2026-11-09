@@ -928,3 +928,215 @@ func TestLogRelayErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestConnectPreservesHalfClose(t *testing.T) {
+	tests := []struct {
+		name     string
+		fragment bool
+	}{
+		{
+			name:     "without fragmentation",
+			fragment: false,
+		},
+		{
+			name:     "with fragmentation enabled",
+			fragment: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			target, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("start target listener: %v", err)
+			}
+			defer target.Close()
+
+			targetDone := make(chan error, 1)
+
+			go func() {
+				conn, err := target.Accept()
+				if err != nil {
+					targetDone <- err
+					return
+				}
+				defer conn.Close()
+
+				if err := conn.SetDeadline(
+					time.Now().Add(5 * time.Second),
+				); err != nil {
+					targetDone <- err
+					return
+				}
+
+				// Read until the client's FIN reaches the target.
+				request, err := io.ReadAll(conn)
+				if err != nil {
+					targetDone <- err
+					return
+				}
+
+				if !bytes.Equal(request, []byte("ping")) {
+					targetDone <- fmt.Errorf(
+						"unexpected request: %q",
+						request,
+					)
+					return
+				}
+
+				// The response must remain possible after EOF.
+				if _, err := io.WriteString(conn, "pong"); err != nil {
+					targetDone <- err
+					return
+				}
+
+				if err := conn.(*net.TCPConn).CloseWrite(); err != nil {
+					targetDone <- err
+					return
+				}
+
+				targetDone <- nil
+			}()
+
+			proxyListener, err := net.Listen(
+				"tcp4",
+				"127.0.0.1:0",
+			)
+			if err != nil {
+				t.Fatalf("start SOCKS5 listener: %v", err)
+			}
+			defer proxyListener.Close()
+
+			proxyDone := make(chan struct{})
+
+			go func() {
+				defer close(proxyDone)
+
+				conn, err := proxyListener.Accept()
+				if err != nil {
+					return
+				}
+
+				handleConnection(
+					conn,
+					testLookupIPv4,
+					tt.fragment,
+					tlsfrag.StrategySNIMidpoint,
+				)
+			}()
+
+			client, err := net.Dial(
+				"tcp4",
+				proxyListener.Addr().String(),
+			)
+			if err != nil {
+				t.Fatalf("connect to SOCKS5 proxy: %v", err)
+			}
+			defer client.Close()
+
+			if err := client.SetDeadline(
+				time.Now().Add(5 * time.Second),
+			); err != nil {
+				t.Fatalf("set client deadline: %v", err)
+			}
+
+			// SOCKS5 greeting: version 5, one method, no authentication.
+			if _, err := client.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+				t.Fatalf("send SOCKS5 greeting: %v", err)
+			}
+
+			var methodReply [2]byte
+
+			if _, err := io.ReadFull(
+				client,
+				methodReply[:],
+			); err != nil {
+				t.Fatalf("read authentication reply: %v", err)
+			}
+
+			if methodReply != [2]byte{0x05, 0x00} {
+				t.Fatalf(
+					"unexpected authentication reply: %v",
+					methodReply,
+				)
+			}
+
+			// CONNECT to the local TCP test server using IPv4.
+			request := []byte{
+				0x05, 0x01, 0x00, 0x01,
+				127, 0, 0, 1,
+				0x00, 0x00,
+			}
+
+			port := target.Addr().(*net.TCPAddr).Port
+
+			binary.BigEndian.PutUint16(
+				request[8:10],
+				uint16(port),
+			)
+
+			if _, err := client.Write(request); err != nil {
+				t.Fatalf("send SOCKS5 CONNECT: %v", err)
+			}
+
+			var connectReply [10]byte
+
+			if _, err := io.ReadFull(
+				client,
+				connectReply[:],
+			); err != nil {
+				t.Fatalf("read SOCKS5 CONNECT reply: %v", err)
+			}
+
+			if connectReply[0] != 0x05 ||
+				connectReply[1] != 0x00 ||
+				connectReply[2] != 0x00 ||
+				connectReply[3] != 0x01 {
+				t.Fatalf(
+					"unexpected CONNECT reply: %v",
+					connectReply,
+				)
+			}
+
+			if _, err := io.WriteString(client, "ping"); err != nil {
+				t.Fatalf("send tunneled data: %v", err)
+			}
+
+			// Stop sending while keeping the receive side open.
+			if err := client.(*net.TCPConn).CloseWrite(); err != nil {
+				t.Fatalf("close client write direction: %v", err)
+			}
+
+			response, err := io.ReadAll(client)
+			if err != nil {
+				t.Fatalf("read tunneled response: %v", err)
+			}
+
+			if string(response) != "pong" {
+				t.Fatalf(
+					"unexpected response: got %q, want %q",
+					response,
+					"pong",
+				)
+			}
+
+			select {
+			case err := <-targetDone:
+				if err != nil {
+					t.Fatalf("target server: %v", err)
+				}
+
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for target server")
+			}
+
+			select {
+			case <-proxyDone:
+				// The relay finished after both directions closed.
+
+			case <-time.After(5 * time.Second):
+				t.Fatal("SOCKS5 handler did not exit")
+			}
+		})
+	}
+}

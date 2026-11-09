@@ -637,3 +637,191 @@ func TestLogRelayErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestConnectPreservesHalfClose(t *testing.T) {
+	tests := []struct {
+		name     string
+		fragment bool
+	}{
+		{
+			name:     "without fragmentation",
+			fragment: false,
+		},
+		{
+			name:     "with fragmentation enabled",
+			fragment: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			target, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("start target listener: %v", err)
+			}
+			defer target.Close()
+
+			targetDone := make(chan error, 1)
+
+			go func() {
+				conn, err := target.Accept()
+				if err != nil {
+					targetDone <- err
+					return
+				}
+				defer conn.Close()
+
+				if err := conn.SetDeadline(
+					time.Now().Add(5 * time.Second),
+				); err != nil {
+					targetDone <- err
+					return
+				}
+
+				// Read until PacketSail forwards the client's FIN.
+				request, err := io.ReadAll(conn)
+				if err != nil {
+					targetDone <- err
+					return
+				}
+
+				if !bytes.Equal(request, []byte("ping")) {
+					targetDone <- fmt.Errorf(
+						"unexpected request: %q",
+						request,
+					)
+					return
+				}
+
+				// Reply after the client has stopped sending.
+				if _, err := io.WriteString(conn, "pong"); err != nil {
+					targetDone <- err
+					return
+				}
+
+				if err := conn.(*net.TCPConn).CloseWrite(); err != nil {
+					targetDone <- err
+					return
+				}
+
+				targetDone <- nil
+			}()
+
+			lookup := func(
+				ctx context.Context,
+				host string,
+			) ([]net.IP, error) {
+				if host != "example.com" {
+					return nil, fmt.Errorf(
+						"unexpected hostname: %s",
+						host,
+					)
+				}
+
+				return []net.IP{net.IPv4(127, 0, 0, 1)}, nil
+			}
+
+			dial := func(
+				ctx context.Context,
+				network string,
+				address string,
+			) (net.Conn, error) {
+				if network != "tcp4" ||
+					address != "127.0.0.1:443" {
+					return nil, fmt.Errorf(
+						"unexpected destination: %s %s",
+						network,
+						address,
+					)
+				}
+
+				var dialer net.Dialer
+
+				return dialer.DialContext(
+					ctx,
+					network,
+					target.Addr().String(),
+				)
+			}
+
+			proxy := httptest.NewServer(newHandler(
+				lookup,
+				dial,
+				tt.fragment,
+				tlsfrag.StrategySNIMidpoint,
+			))
+			defer proxy.Close()
+
+			client, err := net.Dial(
+				"tcp4",
+				proxy.Listener.Addr().String(),
+			)
+			if err != nil {
+				t.Fatalf("connect to HTTP proxy: %v", err)
+			}
+			defer client.Close()
+
+			if err := client.SetDeadline(
+				time.Now().Add(5 * time.Second),
+			); err != nil {
+				t.Fatalf("set client deadline: %v", err)
+			}
+
+			connectRequest := "CONNECT example.com:443 HTTP/1.1\r\n" + "Host: example.com:443\r\n\r\n"
+
+			if _, err := io.WriteString(
+				client,
+				connectRequest,
+			); err != nil {
+				t.Fatalf("send CONNECT request: %v", err)
+			}
+
+			reader := bufio.NewReader(client)
+
+			response, err := http.ReadResponse(reader, nil)
+			if err != nil {
+				t.Fatalf("read CONNECT response: %v", err)
+			}
+
+			if response.StatusCode != http.StatusOK {
+				t.Fatalf(
+					"unexpected CONNECT status: %d",
+					response.StatusCode,
+				)
+			}
+
+			if _, err := io.WriteString(client, "ping"); err != nil {
+				t.Fatalf("send tunneled request: %v", err)
+			}
+
+			// Stop sending but keep the receive direction open.
+			if err := client.(*net.TCPConn).CloseWrite(); err != nil {
+				t.Fatalf("close client write direction: %v", err)
+			}
+
+			// The server must still be able to send its response.
+			reply, err := io.ReadAll(reader)
+			if err != nil {
+				t.Fatalf("read tunneled response: %v", err)
+			}
+
+			if string(reply) != "pong" {
+				t.Fatalf(
+					"unexpected response: got %q, want %q",
+					reply,
+					"pong",
+				)
+			}
+
+			select {
+			case err := <-targetDone:
+				if err != nil {
+					t.Fatalf("target server: %v", err)
+				}
+
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for target server")
+			}
+		})
+	}
+}
