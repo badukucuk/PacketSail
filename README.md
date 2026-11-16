@@ -13,6 +13,8 @@ Discord connectivity on macOS is the first implemented and verified use case. Wi
 - Three fragmentation strategies: `sni-midpoint`, `before-sni`, and `dual-split`
 - DNS-over-HTTPS (DoH) resolution
 - Support for Discord Voice Gateway TLS ports
+- Automatic macOS HTTPS system proxy configuration and restoration
+- Recovery command for interrupted macOS proxy sessions
 
 ## Project Status
 
@@ -48,14 +50,41 @@ Start PacketSail with the HTTP CONNECT proxy and the `dual-split` strategy:
   --fragment-strategy=dual-split
 ```
 
-Configure the macOS network HTTPS proxy to use:
+On macOS, PacketSail automatically detects the active network service and configures its HTTPS proxy to use `127.0.0.1:9877`.
+
+When PacketSail is stopped normally with `Ctrl+C`, it attempts to restore the original HTTPS proxy settings and removes the recovery backup after successful verification.
+
+To manage the system HTTPS proxy manually instead:
+
+```bash
+./bin/packetsail --http-proxy --fragment \
+  --fragment-strategy=dual-split --no-auto-proxy
+```
+
+In manual mode, configure your macOS network service's HTTPS proxy:
 
 - **Server:** `127.0.0.1`
 - **Port:** `9877`
 
-Then launch Discord.
+Disable or restore that configuration manually after stopping PacketSail.
 
-Remember to disable the system HTTPS proxy when PacketSail is no longer running.
+### Proxy Recovery
+
+An unexpected termination may leave the macOS HTTPS proxy pointing to PacketSail after its local server has stopped.
+
+If a previous recovery backup exists, run:
+
+```bash
+./bin/packetsail --recover-proxy
+```
+
+PacketSail checks the saved configuration and restores it only when the current settings are compatible with safe recovery.
+
+If the settings have been changed by another application or by the user, PacketSail refuses to overwrite them and preserves the backup.
+
+The recovery command requires an existing backup and cannot run alongside another PacketSail instance.
+
+Do not manually delete a recovery backup before verifying that the original network settings have been restored.
 
 ### SOCKS5 Proxy
 
@@ -106,6 +135,13 @@ Debug logging is disabled by default.
 - Discord voice UDP traffic is not routed through PacketSail
 - TLS fragmentation does not guarantee successful DPI circumvention
 - TLS fragmentation does not guarantee connectivity on every restricted network
+- Automatic system proxy management is currently available on macOS only
+- Active network service detection is performed at startup; switching networks while PacketSail runs is not automatically handled
+- VPN and complex routing configurations may not be supported
+- Automatic proxy management rejects initial configurations that cannot yet be restored safely, including empty server/port settings
+- Authenticated HTTPS proxy configurations are not supported for automatic restoration
+- Unexpected termination requires recovery using `--recover-proxy`; recovery is not performed automatically
+- Changing macOS proxy settings may require administrative privileges
 
 PacketSail is intended for local experimental use.
 
