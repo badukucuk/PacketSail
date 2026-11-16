@@ -16,7 +16,7 @@ import (
 	"github.com/badukucuk/PacketSail/internal/tlsfrag"
 )
 
-const version = "v0.1.0"
+const version = "v0.2.0"
 
 func main() {
 	os.Exit(run())
