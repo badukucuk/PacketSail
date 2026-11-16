@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -33,10 +34,23 @@ type handler struct {
 
 	debug  bool
 	nextID atomic.Uint64
+
+	// Protect active CONNECT tunnels against concurrent access.
+	mu      sync.Mutex
+	closing bool
+	tunnels map[net.Conn]net.Conn
 }
 
-// ListenAndServe starts the local HTTP CONNECT proxy.
-func ListenAndServe(address string, fragment bool, strategy tlsfrag.Strategy, debug bool) error {
+// Server owns a running HTTP CONNECT listener.
+type Server struct {
+	httpServer *http.Server
+	handler    *handler
+	address    string
+	done       chan error
+}
+
+// Start creates the production HTTP CONNECT handler and listener.
+func Start(address string, fragment bool, strategy tlsfrag.Strategy, debug bool) (*Server, error) {
 	resolver := dns.NewResolver()
 	dialer := &net.Dialer{Timeout: connectTimeout}
 
@@ -48,19 +62,74 @@ func ListenAndServe(address string, fragment bool, strategy tlsfrag.Strategy, de
 	)
 	h.debug = debug
 
-	server := &http.Server{
-		Addr:              address,
+	return startWithHandler(address, h)
+}
+
+// startWithHandler starts a real TCP listener using the supplied handler.
+// Tests can supply controlled DNS and connection behavior.
+func startWithHandler(address string, h *handler) (*Server, error) {
+	listener, err := net.Listen("tcp4", address)
+	if err != nil {
+		return nil, fmt.Errorf("listen for HTTP CONNECT proxy: %w", err)
+	}
+
+	httpServer := &http.Server{
 		Handler:           h,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	log.Printf("HTTP CONNECT proxy listening on %s", address)
+	server := &Server{
+		httpServer: httpServer,
+		handler:    h,
+		address:    listener.Addr().String(),
+		done:       make(chan error, 1),
+	}
 
-	if err := server.ListenAndServe(); err != nil {
+	go func() {
+		err := httpServer.Serve(listener)
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+
+		server.done <- err
+	}()
+
+	log.Printf("HTTP CONNECT proxy listening on %s", listener.Addr())
+
+	return server, nil
+}
+
+// Wait blocks until the HTTP server stops.
+// It must be called only once per Server.
+func (server *Server) Wait() error {
+	if err := <-server.done; err != nil {
 		return fmt.Errorf("serve HTTP CONNECT proxy: %w", err)
 	}
 
 	return nil
+}
+
+// Shutdown closes active CONNECT tunnels and stops the HTTP listener.
+func (server *Server) Shutdown(ctx context.Context) error {
+	// Hijacked connections are not closed by http.Server.Shutdown.
+	// Close them explicitly before stopping the HTTP server.
+	server.handler.closeTunnels()
+
+	if err := server.httpServer.Shutdown(ctx); err != nil {
+		return fmt.Errorf("shut down HTTP CONNECT proxy: %w", err)
+	}
+
+	return nil
+}
+
+// ListenAndServe preserves the existing blocking API.
+func ListenAndServe(address string, fragment bool, strategy tlsfrag.Strategy, debug bool) error {
+	server, err := Start(address, fragment, strategy, debug)
+	if err != nil {
+		return err
+	}
+
+	return server.Wait()
 }
 
 // debugf logs CONNECT events when diagnostics are enabled.
@@ -79,6 +148,61 @@ func newHandler(lookup lookupFunc, dial dialFunc, fragment bool, strategy tlsfra
 		dial:     dial,
 		fragment: fragment,
 		strategy: strategy,
+	}
+}
+
+// registerTunnel tracks both ends of a CONNECT tunnel.
+// New tunnels are rejected once shutdown has started.
+func (h *handler) registerTunnel(client, upstream net.Conn) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.closing {
+		return false
+	}
+
+	if h.tunnels == nil {
+		h.tunnels = make(map[net.Conn]net.Conn)
+	}
+
+	h.tunnels[client] = upstream
+	return true
+}
+
+// unregisterTunnel removes a tunnel after its relay has finished.
+func (h *handler) unregisterTunnel(client net.Conn) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	delete(h.tunnels, client)
+}
+
+// closeTunnels stops new tunnel registration and closes both connections of every currently tracked tunnel.
+func (h *handler) closeTunnels() {
+	h.mu.Lock()
+
+	h.closing = true
+
+	type tunnel struct {
+		client   net.Conn
+		upstream net.Conn
+	}
+
+	active := make([]tunnel, 0, len(h.tunnels))
+
+	for client, upstream := range h.tunnels {
+		active = append(active, tunnel{
+			client:   client,
+			upstream: upstream,
+		})
+	}
+
+	h.mu.Unlock()
+
+	// Never hold the mutex while closing network connections.
+	for _, connection := range active {
+		connection.client.Close()
+		connection.upstream.Close()
 	}
 }
 
@@ -189,6 +313,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer client.Close()
 
+	// Track the tunnel before sending the successful CONNECT response.
+	// If shutdown has begun, both connections are closed by their defers.
+	if !h.registerTunnel(client, upstream) {
+		return
+	}
+	defer h.unregisterTunnel(client)
+
 	// A successful CONNECT response marks the start of the raw TCP tunnel.
 	if _, err := buffered.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 		return
@@ -266,6 +397,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	second := <-finished
 
+	h.mu.Lock()
+	shuttingDown := h.closing
+	h.mu.Unlock()
+
+	// Closing tracked tunnels interrupts active TCP reads and writes.
+	// These errors are expected during an intentional shutdown.
+	first.err = filterShutdownRelayError(first.err, shuttingDown)
+	second.err = filterShutdownRelayError(second.err, shuttingDown)
+
 	logRelayErrors(log.Default(), first.err, second.err)
 
 	h.debugf(
@@ -297,4 +437,17 @@ func logRelayErrors(logger *log.Logger, firstErr, secondErr error) {
 	}
 
 	logger.Printf("HTTP CONNECT relay error: %v", secondErr)
+}
+
+// filterShutdownRelayError suppresses connection errors caused by intentionally closing active tunnels during server shutdown.
+func filterShutdownRelayError(err error, shuttingDown bool) error {
+	if err == nil || !shuttingDown {
+		return err
+	}
+
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+		return nil
+	}
+
+	return err
 }
