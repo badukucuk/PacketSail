@@ -18,7 +18,7 @@ Discord connectivity on macOS is the first implemented and verified use case. Wi
 
 ## Project Status
 
-**v0.2.0 — Automatic macOS HTTPS Proxy Management**
+**v0.2.1 — macOS HTTPS Proxy Compatibility Fix**
 
 PacketSail has successfully enabled Discord desktop connectivity on macOS across multiple tested networks, including messaging, media transfers, and voice communication.
 
