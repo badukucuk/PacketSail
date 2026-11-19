@@ -54,6 +54,8 @@ On macOS, PacketSail automatically detects the active network service and config
 
 When PacketSail is stopped normally with `Ctrl+C`, it attempts to restore the original HTTPS proxy settings and removes the recovery backup after successful verification.
 
+PacketSail also supports initially disabled HTTPS proxy configurations with an empty server and port. These settings are preserved and restored automatically after a normal shutdown.
+
 To manage the system HTTPS proxy manually instead:
 
 ```bash
@@ -138,7 +140,6 @@ Debug logging is disabled by default.
 - Automatic system proxy management is currently available on macOS only
 - Active network service detection is performed at startup; switching networks while PacketSail runs is not automatically handled
 - VPN and complex routing configurations may not be supported
-- Automatic proxy management rejects initial configurations that cannot yet be restored safely, including empty server/port settings
 - Authenticated HTTPS proxy configurations are not supported for automatic restoration
 - Unexpected termination requires recovery using `--recover-proxy`; recovery is not performed automatically
 - Changing macOS proxy settings may require administrative privileges

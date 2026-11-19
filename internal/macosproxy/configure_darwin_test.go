@@ -133,6 +133,27 @@ func TestRestoreHTTPSProxySettings(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "restore disabled empty proxy",
+			settings: HTTPSSettings{
+				Enabled: false,
+				Server:  "",
+				Port:    0,
+			},
+			want: [][]string{
+				{
+					"-setsecurewebproxy",
+					"Wi-Fi",
+					"",
+					"0",
+				},
+				{
+					"-setsecurewebproxystate",
+					"Wi-Fi",
+					"off",
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -186,12 +207,6 @@ func TestRestoreHTTPSProxySettingsRejectsUnsupportedSettings(t *testing.T) {
 					Port:          8080,
 					Authenticated: true,
 				},
-			},
-		},
-		{
-			name: "empty saved server",
-			snapshot: HTTPSProxySnapshot{
-				Service: "Wi-Fi",
 			},
 		},
 		{

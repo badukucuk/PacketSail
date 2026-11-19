@@ -2,6 +2,8 @@ package macosproxy
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -259,5 +261,62 @@ func TestRestoreHTTPSProxyIfSafeVerifiesResult(t *testing.T) {
 
 	if err := restoreHTTPSProxyIfSafe(snapshot, read, run); err == nil {
 		t.Fatal("expected restoration verification to fail")
+	}
+}
+
+func TestRecoverRestoresEmptyHTTPSProxySettings(t *testing.T) {
+	dir := t.TempDir()
+
+	original := HTTPSProxySnapshot{
+		Service:  "Wi-Fi",
+		Settings: HTTPSSettings{},
+	}
+
+	if _, err := saveSnapshotToDir(dir, original); err != nil {
+		t.Fatalf("saveSnapshotToDir(): %v", err)
+	}
+
+	current := managedHTTPSSettings()
+
+	read := func(string) (HTTPSSettings, error) {
+		return current, nil
+	}
+
+	run := func(args ...string) error {
+		switch args[0] {
+		case "-setsecurewebproxy":
+			if args[1] != "Wi-Fi" ||
+				args[2] != "" ||
+				args[3] != "0" {
+				t.Fatalf("unexpected restore command: %v", args)
+			}
+
+			current = HTTPSSettings{Enabled: true}
+
+		case "-setsecurewebproxystate":
+			if args[1] != "Wi-Fi" || args[2] != "off" {
+				t.Fatalf("unexpected state command: %v", args)
+			}
+
+			current.Enabled = false
+
+		default:
+			t.Fatalf("unexpected command: %v", args)
+		}
+
+		return nil
+	}
+
+	if err := recoverFromDir(dir, read, run); err != nil {
+		t.Fatalf("recoverFromDir(): %v", err)
+	}
+
+	if current != original.Settings {
+		t.Fatalf("settings = %+v, want %+v", current, original.Settings)
+	}
+
+	backupPath := filepath.Join(dir, backupFileName)
+	if _, err := os.Stat(backupPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected recovery backup to be removed: %v", err)
 	}
 }

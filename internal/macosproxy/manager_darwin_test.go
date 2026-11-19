@@ -195,38 +195,68 @@ func TestStartProxySessionAlreadyManaged(t *testing.T) {
 	}
 }
 
-func TestStartProxySessionRejectsEmptyInitialSettings(t *testing.T) {
+func TestStartProxySessionWithEmptyInitialSettings(t *testing.T) {
 	snapshot := HTTPSProxySnapshot{
-		Service: "Wi-Fi",
-		Settings: HTTPSSettings{
-			Enabled: false,
-			Server:  "",
-			Port:    0,
-		},
+		Service:  "Wi-Fi",
+		Settings: HTTPSSettings{},
 	}
 
-	read := func(string) (HTTPSSettings, error) {
-		return snapshot.Settings, nil
+	current := snapshot.Settings
+	saved := false
+
+	read := func(service string) (HTTPSSettings, error) {
+		if service != snapshot.Service {
+			t.Fatalf("unexpected service: %q", service)
+		}
+		return current, nil
 	}
 
-	save := func(HTTPSProxySnapshot) (string, error) {
-		t.Fatal("must not save a backup for an unsupported activation")
-		return "", nil
+	save := func(got HTTPSProxySnapshot) (string, error) {
+		if got != snapshot {
+			t.Fatalf("unexpected snapshot: %+v", got)
+		}
+
+		saved = true
+		return "backup.json", nil
 	}
 
 	run := func(args ...string) error {
-		t.Fatal("must not modify settings that cannot be restored")
+		if !saved {
+			t.Fatal("proxy modified before backup")
+		}
+
+		if len(args) != 4 ||
+			args[0] != "-setsecurewebproxy" ||
+			args[1] != "Wi-Fi" ||
+			args[2] != "127.0.0.1" ||
+			args[3] != "9877" {
+			t.Fatalf("unexpected command: %v", args)
+		}
+
+		current = managedHTTPSSettings()
 		return nil
 	}
 
-	activated, err := startProxySession(snapshot, read, save, run)
-
-	if err == nil {
-		t.Fatal("expected unsupported configuration error")
+	activated, err := startProxySession(
+		snapshot,
+		read,
+		save,
+		run,
+	)
+	if err != nil {
+		t.Fatalf("startProxySession(): %v", err)
 	}
 
-	if activated {
-		t.Fatal("proxy must not be activated")
+	if !activated {
+		t.Fatal("expected HTTPS proxy activation")
+	}
+
+	if !saved {
+		t.Fatal("expected original empty settings to be backed up")
+	}
+
+	if current != managedHTTPSSettings() {
+		t.Fatalf("unexpected settings: %+v", current)
 	}
 }
 
@@ -592,5 +622,203 @@ func TestStopProxySessionPreservesCleanupError(t *testing.T) {
 
 	if !errors.Is(err, cleanupErr) {
 		t.Fatalf("expected cleanup error, got %v", err)
+	}
+}
+
+func TestStopProxySessionRestoresEmptySettings(t *testing.T) {
+	original := HTTPSProxySnapshot{
+		Service:  "Wi-Fi",
+		Settings: HTTPSSettings{},
+	}
+
+	current := managedHTTPSSettings()
+	removed := false
+	var commands [][]string
+
+	read := func(string) (HTTPSSettings, error) {
+		return current, nil
+	}
+
+	run := func(args ...string) error {
+		commands = append(
+			commands,
+			append([]string(nil), args...),
+		)
+
+		switch args[0] {
+		case "-setsecurewebproxy":
+			if args[1] != "Wi-Fi" ||
+				args[2] != "" ||
+				args[3] != "0" {
+				t.Fatalf("unexpected restore command: %v", args)
+			}
+
+			current.Server = ""
+			current.Port = 0
+			current.Enabled = true
+
+		case "-setsecurewebproxystate":
+			if args[1] != "Wi-Fi" || args[2] != "off" {
+				t.Fatalf("unexpected state command: %v", args)
+			}
+
+			current.Enabled = false
+
+		default:
+			t.Fatalf("unexpected command: %v", args)
+		}
+
+		return nil
+	}
+
+	remove := func(snapshot HTTPSProxySnapshot) error {
+		if snapshot != original || current != original.Settings {
+			t.Fatal("backup removed before verified restoration")
+		}
+
+		removed = true
+		return nil
+	}
+
+	if err := stopProxySession(
+		original, true, read, remove, run,
+	); err != nil {
+		t.Fatalf("stopProxySession(): %v", err)
+	}
+
+	if current != original.Settings {
+		t.Fatalf("settings = %+v, want %+v", current, original.Settings)
+	}
+
+	if len(commands) != 2 {
+		t.Fatalf("command count = %d, want 2", len(commands))
+	}
+
+	if !removed {
+		t.Fatal("expected recovery backup cleanup")
+	}
+}
+
+func TestStartProxySessionRollbackEmptySettings(t *testing.T) {
+	original := HTTPSProxySnapshot{
+		Service:  "Wi-Fi",
+		Settings: HTTPSSettings{},
+	}
+
+	current := original.Settings
+	activationErr := errors.New("activation failed")
+	saved := false
+	removed := false
+
+	read := func(string) (HTTPSSettings, error) {
+		return current, nil
+	}
+
+	save := func(snapshot HTTPSProxySnapshot) (string, error) {
+		if snapshot != original {
+			t.Fatal("unexpected recovery snapshot")
+		}
+		saved = true
+		return "backup.json", nil
+	}
+
+	remove := func(snapshot HTTPSProxySnapshot) error {
+		if snapshot != original || current != original.Settings {
+			t.Fatal("backup removed before verified rollback")
+		}
+		removed = true
+		return nil
+	}
+
+	run := func(args ...string) error {
+		if !saved {
+			t.Fatal("system modified before backup")
+		}
+
+		switch args[0] {
+		case "-setsecurewebproxy":
+			if args[2] == "127.0.0.1" && args[3] == "9877" {
+				current = managedHTTPSSettings()
+				return activationErr
+			}
+
+			if args[2] != "" || args[3] != "0" {
+				t.Fatalf("unexpected restore command: %v", args)
+			}
+
+			current = HTTPSSettings{Enabled: true}
+			return nil
+
+		case "-setsecurewebproxystate":
+			if args[2] != "off" {
+				t.Fatalf("unexpected proxy state: %v", args)
+			}
+			current.Enabled = false
+			return nil
+
+		default:
+			t.Fatalf("unexpected command: %v", args)
+			return nil
+		}
+	}
+
+	activated, err := startProxySessionWithRollback(
+		original, read, save, remove, run,
+	)
+
+	if activated {
+		t.Fatal("activation must fail")
+	}
+
+	if !errors.Is(err, activationErr) {
+		t.Fatalf("expected activation error, got %v", err)
+	}
+
+	if current != original.Settings {
+		t.Fatalf("settings = %+v, want %+v", current, original.Settings)
+	}
+
+	if !saved || !removed {
+		t.Fatal("expected backup and verified rollback cleanup")
+	}
+}
+
+func TestStopProxySessionPreservesConflictWithEmptySettings(t *testing.T) {
+	original := HTTPSProxySnapshot{
+		Service:  "Wi-Fi",
+		Settings: HTTPSSettings{},
+	}
+
+	changed := HTTPSSettings{
+		Enabled: true,
+		Server:  "other.example.com",
+		Port:    8080,
+	}
+
+	read := func(string) (HTTPSSettings, error) {
+		return changed, nil
+	}
+
+	remove := func(HTTPSProxySnapshot) error {
+		t.Fatal("conflicting settings must preserve the backup")
+		return nil
+	}
+
+	run := func(args ...string) error {
+		t.Fatalf("must not overwrite user settings: %v", args)
+		return nil
+	}
+
+	err := stopProxySession(
+		original, true, read, remove, run,
+	)
+
+	if err == nil {
+		t.Fatal("expected conflicting settings error")
+	}
+
+	if changed.Server != "other.example.com" ||
+		changed.Port != 8080 {
+		t.Fatal("user settings must remain unchanged")
 	}
 }
