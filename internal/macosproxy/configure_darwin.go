@@ -80,15 +80,6 @@ func restoreHTTPSProxySettings(snapshot HTTPSProxySnapshot, run networkSetupRunn
 	}
 
 	settings := snapshot.Settings
-
-	// Empty settings can be backed up, but restoring an empty server
-	// and port is not supported until a safe macOS reset method exists.
-	if settings.Server == "" && settings.Port == 0 {
-		return fmt.Errorf(
-			"cannot restore empty HTTPS proxy settings safely",
-		)
-	}
-
 	service := snapshot.Service
 
 	// Setting the server also enables the HTTPS proxy.

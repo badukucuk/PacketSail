@@ -45,13 +45,6 @@ func startProxySession(
 		return false, nil
 	}
 
-	// Do not modify settings that cannot yet be restored exactly.
-	if snapshot.Settings.Server == "" && snapshot.Settings.Port == 0 {
-		return false, fmt.Errorf(
-			"automatic HTTPS proxy management is not supported for empty initial settings yet",
-		)
-	}
-
 	// Persist the original settings before attempting any modification.
 	if _, err := save(snapshot); err != nil {
 		return false, fmt.Errorf(
